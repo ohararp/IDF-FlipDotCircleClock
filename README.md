@@ -35,12 +35,12 @@ idf.py -p /dev/cu.usbmodem1101 flash monitor
 - [x] **Step 5:** Stepper motor control + Hall sensor homing + Button C re-trigger
 - [x] **Step 6:** AS5600 magnetic encoder + closed-loop control + calibration
 - [x] **Step 7:** Flip-dot display (SPI + relay) + Button B test trigger
-- [ ] **Step 8:** Timekeeping (timezone, DST, clock updates)
-- [ ] **Step 9:** WiFi + NTP synchronization
-- [ ] **Step 10:** HTTP web server + JSON API
-- [ ] **Step 11:** OTA updates via GitHub releases
-- [ ] **Step 12:** Animations
-- [ ] **Step 13:** Integration, buttons, and polish
+- [ ] **Step 8:** Timekeeping (timezone, DST, minute/hour update scheduling)
+- [ ] **Step 9:** Full button input (A/B/C short+long press, calibration, mutex)
+- [ ] **Step 10:** Animations (demo, chaos, sync)
+- [ ] **Step 11:** Integration + polish (standalone soak test, watchdog, brown-out)
+- [ ] **Step 12:** WiFi + NTP synchronization
+- [ ] **Step 13:** HTTP web server + JSON API + OTA updates
 
 ## License
 

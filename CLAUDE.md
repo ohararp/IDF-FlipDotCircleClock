@@ -247,32 +247,115 @@ FlipDotCircleClock/
 
 ## Step 8: Timekeeping — Timezone, DST, Clock Update Logic
 
-**Goal:** Full time management with minute/hour update scheduling.
+**Goal:** Clock runs autonomously using RTC time with proper timezone/DST. Motor and flipdots update on schedule.
 
 **Implement:**
 - `timekeeping.c/.h`:
   - `timekeeping_init()` — load timezone from NVS, read RTC
-  - `timekeeping_get_local_time(struct tm *time)` — RTC + timezone + DST
+  - `timekeeping_get_local_time(struct tm *time)` — RTC + timezone offset + DST
   - `timekeeping_set_timezone(int tz_index)` — update NVS, recalculate
   - `timekeeping_apply_dst(struct tm *utc, int tz_index)` — port DST rules:
     - US: 2nd Sun Mar → 1st Sun Nov
     - EU: Last Sun Mar → Last Sun Oct
     - AU: 1st Sun Oct → 1st Sun Apr
     - NZ: Last Sun Sep → 1st Sun Apr
-  - `timekeeping_sync_from_ntp(time_t ntp_time)` — update RTC
+  - `timekeeping_sync_from_ntp(time_t ntp_time)` — update RTC (stub for now, used in Step 12)
 - 18 timezone definitions as const struct array
-- Integrate with stepper (`minUpdate` equivalent) and flipdot (`hrUpdate` equivalent):
-  - `clock_update_minute()` — move motor to current minute position
-  - `clock_update_hour()` — update flip-dot display for current hour
-- Use `esp_timer` for 1-minute and 1-hour periodic callbacks
+- `clock_update_minute()` — move stepper to current minute (AS5600 closed-loop or open-loop fallback)
+- `clock_update_hour()` — update flip-dot display for current hour (relay on → blank → show hour → relay off)
+- Scheduling: RTC comparison-based (port of CircuitPython main loop):
+  - Track `sec_old`, `min_old`, `hr_old` — compare against RTC each loop iteration
+  - Every second: update OLED time display
+  - Every minute: call `clock_update_minute()`
+  - Every hour: call `clock_update_hour()`, re-home motor to 12 o'clock, then position to current minute
 
-**ESP-IDF APIs:** `esp_timer`, `time.h` (POSIX), `sys/time.h`
+**ESP-IDF APIs:** `time.h` (POSIX), `sys/time.h`
 
-**Verify:** Correct local time across timezone changes. DST transitions produce correct offsets. Motor moves to correct minute position. Flip-dots show correct hour.
+**Verify:** Correct local time with timezone offset. Minute hand advances each minute. Flip-dots update each hour. Motor re-homes hourly.
 
 ---
 
-## Step 9: WiFi + NTP Synchronization
+## Step 9: Full Button Input + Calibration
+
+**Goal:** All 3 buttons functional with short/long press detection (2.0s threshold).
+
+**Implement:**
+- Extend `buttons.c/.h`:
+  - Add Button A (GPIO 1) with ISR
+  - Add long-press detection: track press duration, emit separate short/long events
+  - `BUTTON_EVENT_A_SHORT` / `BUTTON_EVENT_A_LONG`
+  - `BUTTON_EVENT_B_SHORT` / `BUTTON_EVENT_B_LONG`
+  - `BUTTON_EVENT_C_SHORT` / `BUTTON_EVENT_C_LONG`
+- Button A short: re-home sequence (blank display → home motor → update hour + minute)
+- Button A long: reserved for WiFi reconnect (no-op until Step 12)
+- Button B short: +1 hour (advance flipdot display, wrap 12→1)
+- Button B long: trigger sync animation (Step 10)
+- Button C short: +1 minute (advance minute hand one step position)
+- Button C long: enter/confirm AS5600 calibration (wire into existing `calibration.c`)
+- Stepper/flipdot mutex: `xSemaphoreCreateMutex()` to protect motor and flipdot access from concurrent button presses and clock updates
+
+**ESP-IDF APIs:** `gpio` ISR, `freertos/semphr.h`, `esp_timer` (for press duration)
+
+**Verify:** Each button produces correct short/long events. +1 hour/minute works. Calibration enter/save works via long-press C. No motor conflicts between button presses and clock updates.
+
+---
+
+## Step 10: Animations
+
+**Goal:** Port the three animation sequences, triggered by buttons.
+
+**Implement:**
+- `animations.c/.h`:
+  - `anim_demo()` — go home, sweep hours 1–12 on flipdots (1.5s each), restore current time
+  - `anim_chaos()` — random hour positions with motor + flipdot (12 iterations, 1.5s each), restore
+  - `anim_sync()` — synchronized hand sweep to each hour (STEPS/12 per hour, 1.5s each), restore
+  - All animations are blocking (run on caller's task with `vTaskDelay()`)
+  - Suspend display task during animation to prevent OLED conflicts
+  - Acquire motor/flipdot mutex before running
+- Button triggers:
+  - Button A short: `anim_demo()` (or re-home — TBD based on testing)
+  - Button B long: `anim_sync()`
+
+**ESP-IDF APIs:** `esp_random()` for chaos mode, `vTaskDelay()`
+
+**Verify:** Trigger each animation from button press. Motor and flip-dots operate in sync. Animations complete without watchdog timeouts. Clock restores correct time after animation.
+
+---
+
+## Step 11: Integration + Polish (Standalone Clock)
+
+**Goal:** Fully functional standalone clock — runs indefinitely on RTC alone without WiFi.
+
+**Implement:**
+- Complete power-on sequence:
+  1. NVS init
+  2. NeoPixel init
+  3. I2C bus + RTC + OLED + AS5600
+  4. Stepper init + homing
+  5. Flipdot init + show current hour
+  6. Position minute hand to current minute
+  7. Start display task + main button/clock loop
+- NeoPixel status colors (standalone, no WiFi yet):
+  - Green: clock running normally
+  - Yellow: RTC read error or hardware fault
+  - Purple: startup/homing in progress
+- Watchdog timer: configure `esp_task_wdt` for main loop and display task
+- Brown-out detection: log reset reason on boot via `esp_reset_reason()`, show on OLED terminal
+- Motor mutex enforced across all motor/flipdot access points
+- Soak test: run for 24+ hours verifying:
+  - No memory leaks (`esp_get_free_heap_size()` stable)
+  - Minute hand position stays accurate (no cumulative drift)
+  - Hour display updates correctly at each hour boundary
+  - No watchdog resets or crashes
+  - Relay always turns off after flipdot updates
+
+**ESP-IDF APIs:** `esp_task_wdt`, `esp_reset_reason()`, `esp_get_free_heap_size()`
+
+**Verify:** Power on → homes → shows hour → positions minute → runs autonomously. Buttons all work. Leave running overnight — still correct in the morning.
+
+---
+
+## Step 12: WiFi + NTP Synchronization
 
 **Goal:** WiFi connection management and NTP time sync.
 
@@ -284,31 +367,39 @@ FlipDotCircleClock/
   - `network_recover()` — exponential backoff (1s→2s→4s→8s), 3 failures → OFFLINE
   - `network_health_check()` — periodic WiFi status validation
   - `network_get_rssi()` / `network_get_ip_str()`
-  - mDNS: register hostname (e.g. `flipclock.local`) via `mdns` component so the clock is discoverable without knowing its IP
+  - mDNS: register hostname (e.g. `flipclock.local`) via `mdns` component
   - NTP sync via `esp_sntp`:
     - `network_sync_ntp()` — trigger SNTP, update RTC on callback
     - Hourly re-sync via esp_timer
 - WiFi credentials: hardcoded via Kconfig (`menuconfig`) for development
   - `CONFIG_WIFI_SSID` and `CONFIG_WIFI_PASSWORD` in `Kconfig.projbuild`
-  - **TODO (future):** Replace with SoftAP captive portal provisioning + optional `settings.toml` on SPIFFS, with Button A long-press to force AP mode. Consider USB MSC (TinyUSB) to expose flash as a drive for direct file editing over USB-C.
+  - **TODO (future):** SoftAP captive portal provisioning + optional `settings.toml` on SPIFFS
+- Wire `timekeeping_sync_from_ntp()` to SNTP callback
+- Button A long press: trigger `network_recover()` for manual WiFi reconnect
+- NeoPixel colors updated:
+  - Purple: WiFi connecting
+  - Green: WiFi + NTP synced
+  - Yellow: WiFi connection failed
+  - Cyan: WiFi OK, NTP failed
+- Pin WiFi/NTP tasks to Core 0, keep motor/flipdot on Core 1
 
 **ESP-IDF APIs:** `esp_wifi`, `esp_event`, `esp_netif`, `esp_sntp`, `mdns`, `nvs`
 
-**Verify:** Connects to WiFi, gets IP. `flipclock.local` resolves from another device on the network. NTP syncs RTC (compare before/after). Recovery works after WiFi disconnect. OFFLINE mode after 3 failures. Health check triggers recovery.
+**Verify:** Connects to WiFi, gets IP. `flipclock.local` resolves. NTP syncs RTC. Recovery works after disconnect. OFFLINE mode after 3 failures. Clock continues running on RTC when WiFi is down.
 
 ---
 
-## Step 10: HTTP Web Server + JSON API
+## Step 13: HTTP Web Server + JSON API + OTA
 
-**Goal:** Full web control interface matching CircuitPython endpoints.
+**Goal:** Full web control interface and over-the-air firmware updates.
 
 **Implement:**
 - `web_server.c/.h`:
   - `web_server_start()` — start `httpd` on port 80
   - `web_server_stop()`
-  - Register URI handlers:
+  - URI handlers:
     - `GET /` — serve index.html (embedded in flash)
-    - `GET /status.json` — time, timezone, IP, RSSI, uptime, free heap (`esp_get_free_heap_size()`), motor pos
+    - `GET /status.json` — time, timezone, IP, RSSI, uptime, free heap, motor pos
     - `GET /get_timezone` — list of 18 timezones
     - `GET /get_speed` — current step delay
     - `GET /log.json` — recent action log
@@ -320,115 +411,20 @@ FlipDotCircleClock/
     - `POST /set_speed` — change step delay
     - `POST /anim/demo` / `POST /anim/chaos` / `POST /anim/sync`
     - `POST /cal_start` / `POST /cal_save` / `POST /cal_cancel`
-    - `POST /wipe` — physical reset: blank all flip-dots and home the minute hand to 12 o'clock
-    - `POST /stepper_enable` / `POST /stepper_disable` — toggle stepper motor EN pin
-- Action log — two tiers:
-  - **In-memory ring buffer** (~32 entries): fast access, served by `GET /log.json`
-  - **Persistent log on LittleFS** (64KB partition): timestamped entries written to flash, survives reboots. Rotate file at size limit. Served by `GET /log.json?persistent=true`. Invaluable for debugging issues that occur between reboots.
-- Embed `index.html` via `EMBED_FILES` in CMakeLists.txt or SPIFFS partition
+    - `POST /wipe` — blank flip-dots and home minute hand
+    - `POST /stepper_enable` / `POST /stepper_disable` — toggle motor EN pin
+    - `POST /ota/check` / `POST /ota/update` — OTA update endpoints
+  - Web API handlers post commands to FreeRTOS queue consumed by clock task (Core 0 → Core 1)
+- `ota_update.c/.h`:
+  - `ota_check_for_update()` — query GitHub Releases API for newest tag
+  - `ota_perform_update()` — download `.bin` via `esp_https_ota`
+  - `ota_rollback()` — reboot to previous partition
+  - Auto-rollback on 3 consecutive boot failures
+- Custom `partitions.csv` with OTA layout (factory + ota_0 + ota_1 + littlefs)
+- Action log: in-memory ring buffer (~32 entries) + persistent LittleFS log (64KB)
+- Embed `index.html` via `EMBED_FILES` in CMakeLists.txt
 - `cJSON` for JSON response building
 
-**ESP-IDF APIs:** `esp_http_server`, `cJSON` (bundled with ESP-IDF), `esp_partition` or `EMBED_FILES`
+**ESP-IDF APIs:** `esp_http_server`, `cJSON`, `esp_https_ota`, `esp_ota_ops`, `esp_crt_bundle`
 
-**Verify:** Browser loads web UI. Status endpoint returns valid JSON with free heap and uptime. `/log.json` returns recent actions. `/wipe` blanks dots and homes motor. Stepper enable/disable toggles motor holding torque. Test all 18 timezone selections.
-
----
-
-## Step 11: OTA Update via GitHub Release
-
-**Goal:** Over-the-air firmware updates by downloading the latest release binary from GitHub.
-
-**Implement:**
-- `ota_update.c/.h`:
-  - `ota_check_for_update()` — query GitHub Releases API (`https://api.github.com/repos/ohararp/FlipDotCircleClock/releases/latest`) for newest release tag
-  - `ota_get_current_version()` — read version from app description (compiled into firmware)
-  - `ota_perform_update(const char *firmware_url)` — download `.bin` from GitHub release asset, write to OTA partition via `esp_https_ota`
-  - `ota_rollback()` — mark current partition invalid, reboot to previous
-  - Version comparison: semantic versioning string compare (e.g. "v1.2.3")
-- Partition table: dual OTA partitions (`ota_0`, `ota_1`) + factory partition
-  - Custom `partitions.csv` with OTA layout
-- HTTPS support: bundle GitHub's CA certificate for TLS validation
-- Trigger OTA from:
-  - Web UI button (`POST /ota/check`, `POST /ota/update`)
-  - Automatic check on boot (optional, configurable via NVS)
-- Progress reporting: OLED shows download percentage, web API returns status
-- Safety: validate firmware before marking as valid; auto-rollback on 3 consecutive boot failures
-
-**ESP-IDF APIs:** `esp_https_ota`, `esp_ota_ops`, `esp_app_desc`, `esp_http_client`, `esp_crt_bundle` (for GitHub TLS)
-
-**Files:**
-- `ota_update.c/.h` — OTA logic
-- `partitions.csv` — custom partition table with OTA slots
-- `version.h` or use `PROJECT_VER` in `CMakeLists.txt`
-- Add OTA endpoints to `web_server.c`
-
-**Verify:**
-- Build v1.0.0, flash. Create GitHub release v1.0.1 with `.bin` asset.
-- Trigger update from web UI → firmware downloads, reboots to new version.
-- Corrupt a release → rollback to previous version works.
-- Version check correctly identifies "up to date" vs "update available".
-
----
-
-## Step 12: Animations
-
-**Goal:** Port the three animation sequences.
-
-**Implement:**
-- `animations.c/.h`:
-  - `anim_demo()` — full rotation with hour countdown
-  - `anim_chaos()` — random hour patterns
-  - `anim_sync()` — synchronized hand + display sweep
-  - All animations are blocking (run on caller's task with yields)
-  - Use `vTaskDelay()` for timing within animations
-- Wire into web server POST handlers from Step 10
-
-**ESP-IDF APIs:** `esp_random()` for chaos mode, `vTaskDelay()`
-
-**Verify:** Trigger each animation from web UI. Motor and flip-dots operate in sync. Animations complete without watchdog timeouts.
-
----
-
-## Step 13: Integration, Button Input, and Polish
-
-**Goal:** Full feature parity with CircuitPython version (plus OTA).
-
-**Implement:**
-- Button handling: GPIO ISR + debounce for buttons A(1), B(38), C(33)
-  - Button A (IO1): Reset/animation trigger
-  - Button B (IO38): +1 hour / sync animation
-  - Button C (IO33): +1 minute / AS5600 calibration (long-press)
-- NeoPixel status LED (IO48) colors:
-  - Purple: WiFi connecting
-  - Green: WiFi + NTP synced
-  - Yellow: WiFi connection failed
-  - Cyan: WiFi OK, NTP failed
-- FreeRTOS task orchestration:
-  - `clock_task` — minute/hour updates via esp_timer callbacks
-  - `display_task` — 1s OLED refresh loop
-  - `network_task` — WiFi management + NTP + health checks
-  - Web server runs on its own internal task
-- Shared state protection: mutex for motor access (web API vs clock task)
-- Watchdog timer configuration
-- Brown-out detection: log reset reason on boot via `esp_reset_reason()`, display on OLED and in `/status.json` if last reset was brown-out (`ESP_RST_BROWNOUT`). Useful for diagnosing 24V/12V/5V mixed-power issues.
-- Power-on sequence matching CircuitPython:
-  1. GPIO/peripheral init
-  2. RTC read
-  3. Motor init + homing
-  4. Relay precharge
-  5. OLED startup
-  6. WiFi + NTP
-  7. Web server start
-  8. Main loop
-
-**ESP-IDF APIs:** `gpio` ISR, `freertos/semphr.h`, `esp_task_wdt`
-
-**Verify:** Full end-to-end test:
-- Power on → homes → syncs time → displays correct time
-- Minute hand advances each minute
-- Hour display updates each hour
-- Web UI fully functional
-- WiFi recovery works after disconnect
-- Buttons respond correctly
-- NVS settings persist across reboots
-- Run for 24+ hours without drift or crashes
+**Verify:** Browser loads web UI. All endpoints functional. OTA updates from GitHub releases. Rollback works. 24+ hour soak test with WiFi + web server active.

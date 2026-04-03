@@ -1,4 +1,6 @@
 #include <stdio.h>
+#include <string.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -78,8 +80,24 @@ void app_main(void)
     // Init I2C master bus (400 kHz) and attach DS3231 RTC at 0x68; returns bus handle for OLED/AS5600
     i2c_master_bus_handle_t i2c_bus = NULL;
     if (ds3231_init(&i2c_bus) == ESP_OK) {
-        // Seed RTC with firmware compile timestamp (__DATE__/__TIME__) so clock starts reasonably
-        ds3231_set_time_from_compile();
+        // Seed RTC with firmware compile timestamp — parsed here in main.c so it recompiles every build
+        {
+            const char *months[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                    "Jul","Aug","Sep","Oct","Nov","Dec"};
+            struct tm ct = {0};
+            sscanf(__TIME__, "%d:%d:%d", &ct.tm_hour, &ct.tm_min, &ct.tm_sec);
+            char mon[4]; int day, year;
+            sscanf(__DATE__, "%3s %d %d", mon, &day, &year);
+            ct.tm_mday = day;
+            ct.tm_year = year - 1900;
+            for (int i = 0; i < 12; i++) {
+                if (strncmp(mon, months[i], 3) == 0) { ct.tm_mon = i; break; }
+            }
+            ds3231_set_time(&ct);
+            ESP_LOGI(TAG, "RTC set to compile time: %04d-%02d-%02d %02d:%02d:%02d",
+                     ct.tm_year + 1900, ct.tm_mon + 1, ct.tm_mday,
+                     ct.tm_hour, ct.tm_min, ct.tm_sec);
+        }
 
         // Init SH1107 128x64 OLED at 0x3C on the shared I2C bus via U8G2
         if (oled_init(i2c_bus) == ESP_OK) {

@@ -11,19 +11,27 @@ static const char *TAG = "buttons";
 // FreeRTOS queue for button events (ISR → main task)
 static QueueHandle_t s_button_queue;
 
-// Debounce: minimum 200 ms between accepted presses
+// Debounce: minimum 200 ms between accepted presses per button
 #define DEBOUNCE_US 200000
-static int64_t s_last_press_us = 0;
+static int64_t s_last_b_us = 0;
+static int64_t s_last_c_us = 0;
+
+// ISR handler for Button B — posts event to queue with debounce
+static void IRAM_ATTR button_b_isr(void *arg)
+{
+    int64_t now = esp_timer_get_time();
+    if (now - s_last_b_us < DEBOUNCE_US) return;
+    s_last_b_us = now;
+    button_event_t event = BUTTON_EVENT_B_PRESS;
+    xQueueSendFromISR(s_button_queue, &event, NULL);
+}
 
 // ISR handler for Button C — posts event to queue with debounce
 static void IRAM_ATTR button_c_isr(void *arg)
 {
-    int64_t now = esp_timer_get_time(); // µs since boot
-    if (now - s_last_press_us < DEBOUNCE_US) {
-        return; // ignore bounce
-    }
-    s_last_press_us = now;
-
+    int64_t now = esp_timer_get_time();
+    if (now - s_last_c_us < DEBOUNCE_US) return;
+    s_last_c_us = now;
     button_event_t event = BUTTON_EVENT_C_PRESS;
     xQueueSendFromISR(s_button_queue, &event, NULL);
 }
@@ -38,20 +46,21 @@ esp_err_t buttons_init(void)
         return ESP_FAIL;
     }
 
-    // Button C: input with internal pull-up, interrupt on falling edge (press = LOW)
+    // Button B + C: input with internal pull-up, interrupt on falling edge (press = LOW)
     gpio_config_t btn_cfg = {
-        .pin_bit_mask = (1ULL << PIN_BUTTON_C),
+        .pin_bit_mask = (1ULL << PIN_BUTTON_B) | (1ULL << PIN_BUTTON_C),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .intr_type = GPIO_INTR_NEGEDGE, // trigger on press (HIGH → LOW)
     };
     gpio_config(&btn_cfg);
 
-    // Install GPIO ISR service and attach handler for Button C
+    // Install GPIO ISR service and attach handlers for both buttons
     gpio_install_isr_service(0);
+    gpio_isr_handler_add(PIN_BUTTON_B, button_b_isr, NULL);
     gpio_isr_handler_add(PIN_BUTTON_C, button_c_isr, NULL);
 
-    ESP_LOGI(TAG, "Button C initialized on GPIO %d (ISR + debounce)", PIN_BUTTON_C);
+    ESP_LOGI(TAG, "Buttons B=%d C=%d initialized (ISR + debounce)", PIN_BUTTON_B, PIN_BUTTON_C);
     return ESP_OK;
 }
 

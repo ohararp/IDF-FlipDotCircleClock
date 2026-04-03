@@ -34,7 +34,7 @@ idf.py -p /dev/cu.usbmodem1101 flash monitor
 - [x] **Step 4:** NVS persistent storage
 - [x] **Step 5:** Stepper motor control + Hall sensor homing + Button C re-trigger
 - [x] **Step 6:** AS5600 magnetic encoder + closed-loop control + calibration
-- [ ] **Step 7:** Flip-dot display (SPI + relay)
+- [x] **Step 7:** Flip-dot display (SPI + relay) + Button B test trigger
 - [ ] **Step 8:** Timekeeping (timezone, DST, clock updates)
 - [ ] **Step 9:** WiFi + NTP synchronization
 - [ ] **Step 10:** HTTP web server + JSON API

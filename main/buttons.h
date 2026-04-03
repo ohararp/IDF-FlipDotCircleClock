@@ -3,8 +3,9 @@
 #include "esp_err.h"
 #include <stdbool.h>
 
-// Button event types (expandable for buttons A and B later)
+// Button event types
 typedef enum {
+    BUTTON_EVENT_B_PRESS,   // Button B (GPIO 38) short press
     BUTTON_EVENT_C_PRESS,   // Button C (GPIO 33) short press
 } button_event_t;
 

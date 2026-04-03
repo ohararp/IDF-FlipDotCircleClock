@@ -13,6 +13,7 @@
 #include "as5600.h"
 #include "calibration.h"
 #include "buttons.h"
+#include "flipdot.h"
 
 static const char *TAG = "main";
 
@@ -117,6 +118,9 @@ void app_main(void)
         ESP_LOGW(TAG, "DS3231 not found — skipping RTC, OLED, and AS5600");
     }
 
+    // Init flip-dot SPI pins (SCK=36, MOSI=35, LATCH=37), OE (18), and 24V relay (11)
+    ESP_ERROR_CHECK(flipdot_init());
+
     // Init stepper GPIOs (EN, STEP, DIR, MS) and Hall sensor input; loads step delay from NVS
     ESP_ERROR_CHECK(stepper_init());
     // Home motor to 12 o'clock using symmetric Hall sensor edge detection (logs to OLED terminal)
@@ -131,9 +135,22 @@ void app_main(void)
     // Main loop: listen for button events
     button_event_t event;
     while (1) {
+        // Service flipdot relay hold window — turns off relay when hold period expires
+        flipdot_service_power_window();
+
         // Block up to 100 ms waiting for a button press
         if (buttons_get_event(&event, 100)) {
             switch (event) {
+            case BUTTON_EVENT_B_PRESS:
+                // Flipdot test: blank → pause → show hour 12 (all dots) → pause → relay off
+                ESP_LOGI(TAG, "Button B pressed — flipdot test");
+                flipdot_power_on();
+                flipdot_blank();
+                vTaskDelay(pdMS_TO_TICKS(1000)); // 1 s pause so blank is visible
+                flipdot_show_hour(12);
+                vTaskDelay(pdMS_TO_TICKS(1000)); // 1 s hold so dots settle
+                flipdot_power_off();
+                break;
             case BUTTON_EVENT_C_PRESS:
                 // Suspend display task so OLED terminal isn't overwritten during homing
                 ESP_LOGI(TAG, "Button C pressed — re-homing");

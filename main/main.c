@@ -5,8 +5,12 @@
 #include "esp_app_desc.h"
 #include "neopixel.h"
 #include "ds3231.h"
+#include "oled_display.h"
 
 static const char *TAG = "main";
+
+// Track whether OLED was successfully initialized (shared between init and display task)
+static bool s_oled_ok = false;
 
 // Task: toggle NeoPixel purple/off at 500 ms — visual heartbeat during startup
 static void neopixel_blink_task(void *arg)
@@ -23,19 +27,24 @@ static void neopixel_blink_task(void *arg)
     }
 }
 
-// Task: read DS3231 RTC via I2C and log YYYY-MM-DD HH:MM:SS every second
-static void rtc_print_task(void *arg)
+// Task: read DS3231 RTC every second, log to serial, and update OLED if available
+static void display_task(void *arg)
 {
     struct tm now;
     while (1) {
         if (ds3231_get_time(&now) == ESP_OK) {
+            // Log time to serial for debugging
             ESP_LOGI(TAG, "RTC: %04d-%02d-%02d %02d:%02d:%02d",
                      now.tm_year + 1900, now.tm_mon + 1, now.tm_mday,
                      now.tm_hour, now.tm_min, now.tm_sec);
+            // Update OLED with current time if display is available
+            if (s_oled_ok) {
+                oled_update_time(&now);
+            }
         } else {
             ESP_LOGW(TAG, "Failed to read RTC");
         }
-        vTaskDelay(pdMS_TO_TICKS(1000)); // 1 s poll interval
+        vTaskDelay(pdMS_TO_TICKS(1000)); // 1 s refresh interval
     }
 }
 
@@ -54,9 +63,17 @@ void app_main(void)
     if (ds3231_init(&i2c_bus) == ESP_OK) {
         // Seed RTC with firmware compile timestamp (__DATE__/__TIME__) so clock starts reasonably
         ds3231_set_time_from_compile();
-        // Background task: read and log RTC time every 1 s for verification
-        xTaskCreate(rtc_print_task, "rtc_print", 4096, NULL, 3, NULL);
+
+        // Init SH1107 128x64 OLED at 0x3C on the shared I2C bus via U8G2
+        if (oled_init(i2c_bus) == ESP_OK) {
+            s_oled_ok = true;
+        } else {
+            ESP_LOGW(TAG, "OLED init failed — display task will log to serial only");
+        }
+
+        // Background task: refresh RTC time to serial + OLED every 1 s
+        xTaskCreate(display_task, "display", 4096, NULL, 3, NULL);
     } else {
-        ESP_LOGW(TAG, "DS3231 not found — skipping RTC task");
+        ESP_LOGW(TAG, "DS3231 not found — skipping RTC and display tasks");
     }
 }

@@ -10,6 +10,20 @@ The FlipDotCircleClock is a flip-dot circle clock currently running as a single 
 - Hall effect sensor (A3144) for home position, NeoPixel LED (IO48), 3 buttons
 - WiFi with NTP, HTTP web server on port 80
 
+## Code Style: Modular main.c
+
+Keep `main.c` as lean as possible — it should only handle init sequencing and task creation. All functional logic (drivers, timekeeping, animations, etc.) belongs in dedicated modules (`ds3231.c`, `stepper.c`, `network.c`, etc.) with clean header interfaces. This makes each module independently reusable and portable to derivative projects.
+
+## Code Commenting Style (all files)
+
+All code across every file must be highly readable with clear intent. Follow these rules:
+- Every function definition gets a one-line comment above it describing what it does and why.
+- Every non-trivial line or block gets an inline or preceding one-line comment explaining intent.
+- Comments must be **concise but descriptive** — never longer than one line.
+- Include concrete details: peripheral names, I2C addresses, pin numbers, timing values, register names.
+- Magic numbers always get an inline comment (e.g., `0x7F // mask off oscillator-halt bit`).
+- This applies to `.c` files, `.h` files, and `CMakeLists.txt` alike.
+
 ## Architecture: FreeRTOS Task Design (Dual-Core Pinning)
 
 The ESP32-S3 has two cores. Tasks are explicitly pinned to separate network I/O from timing-sensitive hardware control.
@@ -111,15 +125,15 @@ FlipDotCircleClock/
 
 **Implement:**
 - `ds3231.c/.h` — I2C driver for DS3231 (address 0x68)
-  - `ds3231_init(i2c_master_bus_handle_t bus)`
+  - `ds3231_init(i2c_master_bus_handle_t *ret_bus_handle)` — creates shared I2C bus, returns handle for OLED/AS5600
   - `ds3231_get_time(struct tm *time)` — read BCD registers, convert
   - `ds3231_set_time(const struct tm *time)` — write BCD registers
-- Initialize I2C master bus in `main.c` (SDA=8, SCL=9, 400kHz)
+  - `ds3231_set_time_from_compile()` — seed RTC with `__DATE__`/`__TIME__` on every boot
 - Print current RTC time to serial every second
 
 **ESP-IDF APIs:** `i2c_master` (new driver in v5.x+), `esp_log`
 
-**Verify:** Serial output shows correct date/time from RTC. If RTC battery is good, time persists across resets.
+**Verify:** Serial output shows correct date/time from RTC. Compile-time seeding sets RTC on each flash.
 
 ---
 

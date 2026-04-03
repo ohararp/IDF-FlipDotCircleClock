@@ -29,12 +29,12 @@ idf.py -p /dev/cu.usbmodem1101 flash monitor
 ## Porting Progress
 
 - [x] **Step 1:** Project skeleton, GPIO definitions, NeoPixel blink
-- [ ] **Step 2:** I2C bus + DS3231 RTC driver (compile-time seeding on each flash)
-- [ ] **Step 3:** NVS persistent storage
-- [ ] **Step 4:** Stepper motor control + Hall sensor homing
-- [ ] **Step 5:** AS5600 magnetic encoder + closed-loop control
-- [ ] **Step 6:** Flip-dot display (SPI + relay)
-- [ ] **Step 7:** OLED display (SH1107)
+- [x] **Step 2:** I2C bus + DS3231 RTC driver (compile-time seeding on each flash)
+- [ ] **Step 3:** OLED display (SH1107)
+- [ ] **Step 4:** NVS persistent storage
+- [ ] **Step 5:** Stepper motor control + Hall sensor homing
+- [ ] **Step 6:** AS5600 magnetic encoder + closed-loop control
+- [ ] **Step 7:** Flip-dot display (SPI + relay)
 - [ ] **Step 8:** Timekeeping (timezone, DST, clock updates)
 - [ ] **Step 9:** WiFi + NTP synchronization
 - [ ] **Step 10:** HTTP web server + JSON API

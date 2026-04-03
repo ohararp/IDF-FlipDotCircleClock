@@ -137,7 +137,26 @@ FlipDotCircleClock/
 
 ---
 
-## Step 3: NVS Storage Module
+## Step 3: OLED Display (SH1107)
+
+**Goal:** Status display showing time, network info, motor position.
+
+**Implement:**
+- `oled_display.c/.h`:
+  - `oled_init(i2c_master_bus_handle_t bus)` — initialize SH1107 via `esp_lcd` panel driver
+  - `oled_update_time(const struct tm *time)` — HH:MM:SS display
+  - `oled_update_status(const char *ip, int rssi, uint32_t uptime, int motor_pos)`
+  - `oled_clear()`
+  - Use LVGL or direct framebuffer writes for text rendering
+- `idf_component.yml` — add `espressif/ssd1306` component (supports SH1107)
+
+**ESP-IDF APIs:** `esp_lcd`, `esp_lcd_panel_io_i2c`, `espressif/ssd1306` component
+
+**Verify:** OLED shows current time from RTC, refreshing every second. Status fields display placeholder data.
+
+---
+
+## Step 4: NVS Storage Module
 
 **Goal:** Persistent configuration storage matching CircuitPython NVM layout.
 
@@ -158,7 +177,7 @@ FlipDotCircleClock/
 
 ---
 
-## Step 4: Stepper Motor Control + Hall Sensor Homing
+## Step 5: Stepper Motor Control + Hall Sensor Homing
 
 **Goal:** Drive the TMC2209 stepper and home to 12 o'clock position.
 
@@ -178,7 +197,7 @@ FlipDotCircleClock/
 
 ---
 
-## Step 5: AS5600 Magnetic Encoder + Closed-Loop Motor Control
+## Step 6: AS5600 Magnetic Encoder + Closed-Loop Motor Control
 
 **Goal:** Read absolute angle and implement closed-loop positioning.
 
@@ -202,7 +221,7 @@ FlipDotCircleClock/
 
 ---
 
-## Step 6: Flip-Dot Display (SPI + Relay Power Management)
+## Step 7: Flip-Dot Display (SPI + Relay Power Management)
 
 **Goal:** Control the 3x4 flip-dot matrix with proper 24V relay sequencing.
 
@@ -219,25 +238,6 @@ FlipDotCircleClock/
 **ESP-IDF APIs:** `spi_master`, `gpio`, `esp_timer`
 
 **Verify:** Call `flipdot_show_hour(3)` — correct 3 dots flip. `flipdot_blank()` then `flipdot_all_on()` cycles all dots. Relay precharge timing verified with scope/multimeter.
-
----
-
-## Step 7: OLED Display (SH1107)
-
-**Goal:** Status display showing time, network info, motor position.
-
-**Implement:**
-- `oled_display.c/.h`:
-  - `oled_init(i2c_master_bus_handle_t bus)` — initialize SH1107 via `esp_lcd` panel driver
-  - `oled_update_time(const struct tm *time)` — HH:MM:SS display
-  - `oled_update_status(const char *ip, int rssi, uint32_t uptime, int motor_pos)`
-  - `oled_clear()`
-  - Use LVGL or direct framebuffer writes for text rendering
-- `idf_component.yml` — add `espressif/ssd1306` component (supports SH1107)
-
-**ESP-IDF APIs:** `esp_lcd`, `esp_lcd_panel_io_i2c`, `espressif/ssd1306` component
-
-**Verify:** OLED shows current time from RTC, refreshing every second. Status fields display placeholder data.
 
 ---
 

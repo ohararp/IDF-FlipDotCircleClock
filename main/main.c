@@ -7,6 +7,8 @@
 #include "ds3231.h"
 #include "oled_display.h"
 #include "nvm_storage.h"
+#include "stepper.h"
+#include "buttons.h"
 
 static const char *TAG = "main";
 
@@ -80,10 +82,33 @@ void app_main(void)
         } else {
             ESP_LOGW(TAG, "OLED init failed — display task will log to serial only");
         }
-
-        // Background task: refresh RTC time to serial + OLED every 1 s
-        xTaskCreate(display_task, "display", 4096, NULL, 3, NULL);
     } else {
-        ESP_LOGW(TAG, "DS3231 not found — skipping RTC and display tasks");
+        ESP_LOGW(TAG, "DS3231 not found — skipping RTC and OLED");
+    }
+
+    // Init stepper GPIOs (EN, STEP, DIR, MS) and Hall sensor input; loads step delay from NVS
+    ESP_ERROR_CHECK(stepper_init());
+    // Home motor to 12 o'clock using symmetric Hall sensor edge detection (logs to OLED terminal)
+    stepper_find_home();
+
+    // Init Button C (GPIO 33) with ISR + debounce for re-triggering homing
+    ESP_ERROR_CHECK(buttons_init());
+
+    // Background task: refresh RTC time to serial + OLED every 1 s
+    xTaskCreate(display_task, "display", 4096, NULL, 3, NULL);
+
+    // Main loop: listen for button events
+    button_event_t event;
+    while (1) {
+        // Block up to 100 ms waiting for a button press
+        if (buttons_get_event(&event, 100)) {
+            switch (event) {
+            case BUTTON_EVENT_C_PRESS:
+                // Re-trigger homing sequence (OLED switches to terminal during homing)
+                ESP_LOGI(TAG, "Button C pressed — re-homing");
+                stepper_find_home();
+                break;
+            }
+        }
     }
 }

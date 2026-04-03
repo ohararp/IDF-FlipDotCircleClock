@@ -17,3 +17,6 @@ void oled_update_status(const char *ip, int rssi, uint32_t uptime, int motor_pos
 
 // Clear the entire OLED display
 void oled_clear(void);
+
+// Print a line to the OLED scrolling terminal (8 lines × ~25 chars, 5x7 font)
+void oled_terminal_print(const char *line);

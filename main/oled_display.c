@@ -168,3 +168,35 @@ void oled_clear(void)
     u8g2_ClearBuffer(&s_u8g2);
     u8g2_SendBuffer(&s_u8g2);
 }
+
+// ── Scrolling terminal mode ──────────────────────────────────────────────────
+
+#define TERM_MAX_LINES  8   // 64px tall / 8px per line = 8 visible lines
+#define TERM_LINE_LEN   26  // 128px wide / 5px per char ≈ 25 chars + null
+
+// Ring buffer of terminal lines — newest at index (s_term_head - 1)
+static char s_term_lines[TERM_MAX_LINES][TERM_LINE_LEN];
+static int s_term_count = 0; // total lines added (for indexing into ring buffer)
+
+// Append a line to the scrolling terminal and immediately render to OLED
+void oled_terminal_print(const char *line)
+{
+    // Write into ring buffer at next slot
+    int idx = s_term_count % TERM_MAX_LINES;
+    strncpy(s_term_lines[idx], line, TERM_LINE_LEN - 1);
+    s_term_lines[idx][TERM_LINE_LEN - 1] = '\0'; // ensure null termination
+    s_term_count++;
+
+    // Render all visible lines to OLED
+    u8g2_ClearBuffer(&s_u8g2);
+    u8g2_SetFont(&s_u8g2, u8g2_font_5x7_tr); // 5x7 monospace font
+
+    int visible = (s_term_count < TERM_MAX_LINES) ? s_term_count : TERM_MAX_LINES;
+    int start = (s_term_count < TERM_MAX_LINES) ? 0 : s_term_count - TERM_MAX_LINES;
+
+    for (int i = 0; i < visible; i++) {
+        int buf_idx = (start + i) % TERM_MAX_LINES;
+        u8g2_DrawStr(&s_u8g2, 0, 7 + (i * 8), s_term_lines[buf_idx]); // 8px line height
+    }
+    u8g2_SendBuffer(&s_u8g2); // push to display
+}

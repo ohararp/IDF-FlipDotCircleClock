@@ -10,6 +10,10 @@ The FlipDotCircleClock is a flip-dot circle clock currently running as a single 
 - Hall effect sensor (A3144) for home position, NeoPixel LED (IO48), 3 buttons
 - WiFi with NTP, HTTP web server on port 80
 
+## Commit Rule: Always Update README.md
+
+Every commit must update `README.md` to reflect the current state — mark completed steps in the porting checklist, and note any new features or modules added. Never commit without checking the README is current.
+
 ## Code Style: Modular main.c
 
 Keep `main.c` as lean as possible — it should only handle init sequencing and task creation. All functional logic (drivers, timekeeping, animations, etc.) belongs in dedicated modules (`ds3231.c`, `stepper.c`, `network.c`, etc.) with clean header interfaces. This makes each module independently reusable and portable to derivative projects.

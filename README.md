@@ -30,9 +30,9 @@ idf.py -p /dev/cu.usbmodem1101 flash monitor
 
 - [x] **Step 1:** Project skeleton, GPIO definitions, NeoPixel blink
 - [x] **Step 2:** I2C bus + DS3231 RTC driver (compile-time seeding on each flash)
-- [ ] **Step 3:** OLED display (SH1107)
-- [ ] **Step 4:** NVS persistent storage
-- [ ] **Step 5:** Stepper motor control + Hall sensor homing
+- [x] **Step 3:** OLED display (SH1107) + scrolling terminal mode
+- [x] **Step 4:** NVS persistent storage
+- [x] **Step 5:** Stepper motor control + Hall sensor homing + Button C re-trigger
 - [ ] **Step 6:** AS5600 magnetic encoder + closed-loop control
 - [ ] **Step 7:** Flip-dot display (SPI + relay)
 - [ ] **Step 8:** Timekeeping (timezone, DST, clock updates)

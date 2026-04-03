@@ -6,6 +6,7 @@
 #include "neopixel.h"
 #include "ds3231.h"
 #include "oled_display.h"
+#include "nvm_storage.h"
 
 static const char *TAG = "main";
 
@@ -52,6 +53,15 @@ void app_main(void)
 {
     const esp_app_desc_t *app_desc = esp_app_get_description();
     ESP_LOGI(TAG, "FlipDotCircleClock v%s starting...", app_desc->version);
+
+    // Init NVS flash and load persistent config (timezone, step delay, calibration, etc.)
+    ESP_ERROR_CHECK(nvm_init());
+
+    // Log current config values for verification
+    uint8_t tz = 0; uint16_t step_delay = 0;
+    nvm_get_timezone_index(&tz);
+    nvm_get_step_delay(&step_delay);
+    ESP_LOGI(TAG, "NVS config: timezone=%d, step_delay=%d us", tz, step_delay);
 
     // Init WS2812 NeoPixel on PIN_NEOPIXEL via RMT peripheral
     ESP_ERROR_CHECK(neopixel_init());

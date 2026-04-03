@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include "stepper.h"
+#include "as5600.h"
 #include "gpio_config.h"
 #include "nvm_storage.h"
 #include "oled_display.h"
@@ -249,4 +251,56 @@ esp_err_t stepper_find_home(void)
 
     home_log("Home: done!");
     return ESP_OK;
+}
+
+// Closed-loop move using AS5600 feedback with batched stepping (port of moveToAngle)
+bool stepper_move_to_angle(uint16_t target_raw, int tolerance)
+{
+    if (!as5600_is_connected()) {
+        return false; // caller should fall back to open-loop
+    }
+
+    stepper_enable();
+    int steps_taken = 0;
+    const int max_steps = 1000; // safety limit to prevent infinite loops
+
+    while (steps_taken < max_steps) {
+        // Read current AS5600 angle
+        uint16_t current;
+        if (as5600_read_raw_angle(&current) != ESP_OK) {
+            return false;
+        }
+
+        // Calculate shortest-path difference (positive = CW needed)
+        int diff = as5600_angle_diff(current, target_raw);
+        int abs_diff = abs(diff);
+
+        // Check if within tolerance — target reached
+        if (abs_diff <= tolerance) {
+            s_step_now = as5600_to_steps(current); // sync step counter with encoder
+            return true;
+        }
+
+        // Choose batch size based on distance to target
+        bool cw = (diff > 0);
+        int batch;
+        if (abs_diff > 200) {
+            batch = 50;       // far: 50 steps (~16 AS5600 units) between reads
+        } else if (abs_diff > 50) {
+            batch = 15;       // medium: 15 steps between reads
+        } else if (abs_diff > tolerance * 2) {
+            batch = 5;        // close: 5 steps between reads
+        } else {
+            batch = 1;        // very close: single-step fine-tuning
+        }
+
+        // Take batched steps without reading sensor between them
+        for (int i = 0; i < batch && steps_taken < max_steps; i++) {
+            one_step(cw);
+            steps_taken++;
+        }
+    }
+
+    ESP_LOGW(TAG, "move_to_angle: max_steps exceeded");
+    return false;
 }

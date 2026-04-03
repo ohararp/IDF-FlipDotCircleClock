@@ -8,12 +8,17 @@
 #include "oled_display.h"
 #include "nvm_storage.h"
 #include "stepper.h"
+#include "as5600.h"
+#include "calibration.h"
 #include "buttons.h"
 
 static const char *TAG = "main";
 
 // Track whether OLED was successfully initialized (shared between init and display task)
 static bool s_oled_ok = false;
+
+// Handle for the display task so it can be suspended/resumed during homing
+static TaskHandle_t s_display_task = NULL;
 
 // Task: toggle NeoPixel purple/off at 500 ms — visual heartbeat during startup
 static void neopixel_blink_task(void *arg)
@@ -40,7 +45,7 @@ static void display_task(void *arg)
             ESP_LOGI(TAG, "RTC: %04d-%02d-%02d %02d:%02d:%02d",
                      now.tm_year + 1900, now.tm_mon + 1, now.tm_mday,
                      now.tm_hour, now.tm_min, now.tm_sec);
-            // Update OLED with current time if display is available
+            // Update OLED with current time (task is suspended during homing so no conflict)
             if (s_oled_ok) {
                 oled_update_time(&now);
             }
@@ -82,8 +87,16 @@ void app_main(void)
         } else {
             ESP_LOGW(TAG, "OLED init failed — display task will log to serial only");
         }
+        // Init AS5600 magnetic encoder at 0x36 on the shared I2C bus (optional — closed-loop fallback)
+        if (as5600_init(i2c_bus) == ESP_OK) {
+            uint16_t angle;
+            as5600_read_raw_angle(&angle);
+            ESP_LOGI(TAG, "AS5600 connected: raw=%d (%.1f deg)", angle, as5600_to_degrees(angle));
+        } else {
+            ESP_LOGW(TAG, "AS5600 not found — using open-loop motor control");
+        }
     } else {
-        ESP_LOGW(TAG, "DS3231 not found — skipping RTC and OLED");
+        ESP_LOGW(TAG, "DS3231 not found — skipping RTC, OLED, and AS5600");
     }
 
     // Init stepper GPIOs (EN, STEP, DIR, MS) and Hall sensor input; loads step delay from NVS
@@ -94,8 +107,8 @@ void app_main(void)
     // Init Button C (GPIO 33) with ISR + debounce for re-triggering homing
     ESP_ERROR_CHECK(buttons_init());
 
-    // Background task: refresh RTC time to serial + OLED every 1 s
-    xTaskCreate(display_task, "display", 4096, NULL, 3, NULL);
+    // Background task: refresh RTC time to serial + OLED every 1 s (save handle for suspend/resume)
+    xTaskCreate(display_task, "display", 4096, NULL, 3, &s_display_task);
 
     // Main loop: listen for button events
     button_event_t event;
@@ -104,9 +117,12 @@ void app_main(void)
         if (buttons_get_event(&event, 100)) {
             switch (event) {
             case BUTTON_EVENT_C_PRESS:
-                // Re-trigger homing sequence (OLED switches to terminal during homing)
+                // Suspend display task so OLED terminal isn't overwritten during homing
                 ESP_LOGI(TAG, "Button C pressed — re-homing");
+                if (s_display_task) vTaskSuspend(s_display_task);
                 stepper_find_home();
+                vTaskDelay(pdMS_TO_TICKS(3000)); // hold terminal on screen for 3 s so results are readable
+                if (s_display_task) vTaskResume(s_display_task);
                 break;
             }
         }

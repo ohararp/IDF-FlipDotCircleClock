@@ -33,7 +33,7 @@ idf.py -p /dev/cu.usbmodem1101 flash monitor
 - [x] **Step 3:** OLED display (SH1107) + scrolling terminal mode
 - [x] **Step 4:** NVS persistent storage
 - [x] **Step 5:** Stepper motor control + Hall sensor homing + Button C re-trigger
-- [ ] **Step 6:** AS5600 magnetic encoder + closed-loop control
+- [x] **Step 6:** AS5600 magnetic encoder + closed-loop control + calibration
 - [ ] **Step 7:** Flip-dot display (SPI + relay)
 - [ ] **Step 8:** Timekeeping (timezone, DST, clock updates)
 - [ ] **Step 9:** WiFi + NTP synchronization

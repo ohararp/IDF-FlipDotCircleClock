@@ -27,3 +27,7 @@ void stepper_set_position(int position);
 
 // Read Hall sensor: true = magnet detected (sensor active LOW)
 bool stepper_hall_detected(void);
+
+// Closed-loop move to target AS5600 raw angle using batched stepping + feedback
+// Falls back to open-loop if AS5600 unavailable. Returns true if target reached.
+bool stepper_move_to_angle(uint16_t target_raw, int tolerance);

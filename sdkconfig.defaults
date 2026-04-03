@@ -1,0 +1,11 @@
+# Target: ESP32-S3 (Unexpected Maker FeatherS3)
+CONFIG_IDF_TARGET="esp32s3"
+
+# Flash: 16MB
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# CPU: 240MHz dual-core
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# Console over USB CDC (FeatherS3 native USB)
+CONFIG_ESP_CONSOLE_USB_CDC=y

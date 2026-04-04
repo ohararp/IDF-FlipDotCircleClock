@@ -198,19 +198,29 @@ esp_err_t timekeeping_sync_from_ntp(time_t utc_epoch)
 
 // ── Clock update functions ───────────────────────────────────────────────────
 
-// Move stepper to the current minute position (0–59 → 0–12799 steps, open-loop CW only)
+// Move stepper to the current minute position (0–59 → 0–12799 steps)
+// Open-loop bulk CW move, then PID fine-tune with AS5600 if available
 void clock_update_minute(const struct tm *local)
 {
     int minute = local->tm_min;
     int target_steps = (minute * STEPPER_STEPS_PER_REV) / 60;
 
-    // Open-loop step counting: calculate CW steps needed from current position
+    // Open-loop: calculate CW steps needed from current position
     int current_pos = stepper_get_position();
     int steps_needed = (target_steps - current_pos + STEPPER_STEPS_PER_REV) % STEPPER_STEPS_PER_REV;
     if (steps_needed > 0) {
-        stepper_multi_step(steps_needed, true); // CW only
+        stepper_multi_step(steps_needed, true); // CW bulk move
     }
     stepper_set_position(target_steps);
+
+    // TODO: PID fine-tune disabled until AS5600 reads are verified
+    if (false && as5600_is_connected()) {
+        uint16_t home_offset = calibration_get_offset();
+        if (home_offset != 0) {
+            uint16_t target_raw = as5600_minute_to_raw(minute, home_offset);
+            stepper_move_to_angle(target_raw, 100);
+        }
+    }
 
     ESP_LOGI(TAG, "Minute update: %02d → step %d (from %d, moved %d)",
              minute, target_steps, current_pos, steps_needed);

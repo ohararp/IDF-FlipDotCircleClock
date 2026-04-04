@@ -121,7 +121,7 @@ static void setup(void)
         }
 
         // AS5600 magnetic encoder at 0x36 (optional — closed-loop fallback)
-        if (as5600_init(i2c_bus) == ESP_OK) {
+        if (as5600_setup(i2c_bus) == ESP_OK) {
             uint16_t angle;
             as5600_read_raw_angle(&angle);
             ESP_LOGI(TAG, "AS5600: raw=%d (%.1f deg)", angle, as5600_to_degrees(angle));
@@ -216,22 +216,38 @@ void app_main(void)
                 switch (event) {
 
                 case BUTTON_EVENT_A_SHORT:
-                    // Home minute hand to 12 o'clock, hold 5s, then restore to current minute
-                    ESP_LOGI(TAG, "Btn A short — home → hold 5s → restore");
+                    // Home minute hand to 12 o'clock and stay there for debugging
+                    ESP_LOGI(TAG, "Btn A short — home and hold");
                     stepper_find_home();
-                    vTaskDelay(pdMS_TO_TICKS(5000)); // hold at 12 o'clock for 5 seconds
-                    timekeeping_get_local_time(&local);
-                    clock_update_minute(&local);
-                    min_old = local.tm_min;
-                    hr_old = local.tm_hour;
                     break;
 
-                case BUTTON_EVENT_A_LONG:
-                    // Reserved for WiFi reconnect (Step 12) — no-op for now
-                    ESP_LOGI(TAG, "Btn A long — reserved (WiFi reconnect)");
-                    oled_terminal_print("WiFi: not yet impl");
-                    vTaskDelay(pdMS_TO_TICKS(1000));
+                case BUTTON_EVENT_A_LONG: {
+                    // AS5600 mapping test: step to 12, 15, 30, 45, 60 min positions
+                    // At each position, wait for user to confirm hand placement, read AS5600
+                    // AS5600 live debug: motor off, print angle every 500ms, press C to exit
+                    ESP_LOGI(TAG, "Btn A long — AS5600 live debug");
+                    oled_terminal_print("AS5600 LIVE DEBUG");
+                    oled_terminal_print("Turn hand by hand");
+                    oled_terminal_print("Press C to exit");
+                    stepper_disable();
+
+                    app_button_event_t dbg_evt;
+                    while (1) {
+                        // Dump all registers to serial, show raw angle on OLED
+                        as5600_debug_dump();
+                        uint16_t angle = 0;
+                        as5600_read_raw_angle(&angle);
+                        char buf[26];
+                        snprintf(buf, sizeof(buf), "raw=%d  %.1fdeg", angle, as5600_to_degrees(angle));
+                        oled_terminal_print(buf);
+                        if (buttons_get_event(&dbg_evt, 500)) {
+                            if (dbg_evt == BUTTON_EVENT_C_SHORT) break;
+                        }
+                    }
+                    stepper_enable();
+                    oled_terminal_print("Debug exited");
                     break;
+                }
 
                 case BUTTON_EVENT_B_SHORT:
                     // +1 hour: read RTC, add 1 hour, write back, update flipdot display

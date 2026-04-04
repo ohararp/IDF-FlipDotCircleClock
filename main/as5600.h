@@ -5,10 +5,10 @@
 #include "esp_err.h"
 #include "driver/i2c_master.h"
 
-#define AS5600_I2C_ADDR 0x36 // 7-bit I2C address of the AS5600 magnetic encoder
+// AS5600 I2C address defined in esp_as5600 library as AS5600_DEFAULT_ADDRESS (0x36)
 
 // Attach AS5600 to an existing I2C bus, probe for presence
-esp_err_t as5600_init(i2c_master_bus_handle_t bus_handle);
+esp_err_t as5600_setup(i2c_master_bus_handle_t bus_handle);
 
 // Read raw 12-bit angle (0–4095, maps to 0°–360°)
 esp_err_t as5600_read_raw_angle(uint16_t *angle);
@@ -27,3 +27,6 @@ int as5600_to_steps(uint16_t raw);
 
 // Convert minute (0–59) to expected AS5600 raw value using home offset
 uint16_t as5600_minute_to_raw(int minute, uint16_t home_offset);
+
+// Debug: dump all angle-related registers to serial log
+void as5600_debug_dump(void);

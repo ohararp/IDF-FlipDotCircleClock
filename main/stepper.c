@@ -48,6 +48,56 @@ static void one_step(bool clockwise)
     }
 }
 
+// Generate one step pulse with explicit delay (used by ramped stepping)
+static void one_step_delay(bool clockwise, uint16_t delay_us)
+{
+    set_direction(clockwise);
+    gpio_set_level(PIN_STEPPER_STEP, 1);
+    esp_rom_delay_us(2);
+    gpio_set_level(PIN_STEPPER_STEP, 0);
+    esp_rom_delay_us(delay_us);
+
+    if (clockwise) {
+        s_step_now = (s_step_now + 1) % STEPPER_STEPS_PER_REV;
+    } else {
+        s_step_now = (s_step_now - 1 + STEPPER_STEPS_PER_REV) % STEPPER_STEPS_PER_REV;
+    }
+}
+
+// Trapezoidal speed profile: accel (20%) → cruise (60%) → decel (20%)
+// Linearly interpolates step delay between start/cruise/end speeds
+static void multi_step_ramped(int steps, bool cw, uint16_t start_delay, uint16_t cruise_delay, uint16_t end_delay)
+{
+    if (steps <= 0) return;
+
+    // Phase boundaries: 20% accel, 60% cruise, 20% decel (minimum 1 step each)
+    int accel_steps = steps / 5;   // 20%
+    int decel_steps = steps / 5;   // 20%
+    if (accel_steps < 1) accel_steps = 1;
+    if (decel_steps < 1) decel_steps = 1;
+    int cruise_steps = steps - accel_steps - decel_steps;
+    if (cruise_steps < 0) cruise_steps = 0;
+
+    // Accel phase: ramp from start_delay down to cruise_delay
+    for (int i = 0; i < accel_steps; i++) {
+        float t = (accel_steps > 1) ? (float)i / (float)(accel_steps - 1) : 1.0f;
+        uint16_t delay = start_delay + (uint16_t)((float)(cruise_delay - start_delay) * t);
+        one_step_delay(cw, delay);
+    }
+
+    // Cruise phase: constant cruise_delay
+    for (int i = 0; i < cruise_steps; i++) {
+        one_step_delay(cw, cruise_delay);
+    }
+
+    // Decel phase: ramp from cruise_delay up to end_delay
+    for (int i = 0; i < decel_steps; i++) {
+        float t = (decel_steps > 1) ? (float)i / (float)(decel_steps - 1) : 1.0f;
+        uint16_t delay = cruise_delay + (uint16_t)((float)(end_delay - cruise_delay) * t);
+        one_step_delay(cw, delay);
+    }
+}
+
 // ── Log helper: prints to both serial and OLED terminal ──────────────────────
 
 static void home_log(const char *fmt, ...)
@@ -154,7 +204,7 @@ esp_err_t stepper_find_home(void)
         if (home_angle != 0) {
             // PID closed-loop: move directly to calibrated 12 o'clock angle
             home_log("Home: PID to %d", home_angle);
-            if (stepper_move_to_angle(home_angle, 5)) {
+            if (stepper_move_to_angle(home_angle, 1)) {
                 s_step_now = 0; // at 12 o'clock = step 0
                 home_log("Home: done!");
                 return ESP_OK;
@@ -187,8 +237,6 @@ bool stepper_move_to_angle(uint16_t target_raw, int tolerance)
 
     stepper_enable();
 
-    stepper_enable();
-
     // Read initial position
     uint16_t current;
     as5600_read_raw_angle(&current);
@@ -196,9 +244,6 @@ bool stepper_move_to_angle(uint16_t target_raw, int tolerance)
 
     // AS5600-to-step ratio: ~3.12 steps per AS5600 unit (12800 / 4096)
     const float STEPS_PER_UNIT = (float)STEPPER_STEPS_PER_REV / 4096.0f;
-
-    // Save original step delay so we can restore it after
-    uint16_t original_delay = s_step_delay_us;
 
     const int max_iterations = 100;
     bool converged = false;
@@ -217,41 +262,36 @@ bool stepper_move_to_angle(uint16_t target_raw, int tolerance)
             break;
         }
 
-        // Non-linear approach: step count, motor speed, and settle time scale with distance
+        // Non-linear ramped approach: step count and speed profile scale with distance
         int steps;
         int settle_ms;
 
         if (cw_dist > 1000) {
-            // Very far (>88°): 80% of distance, fast motor, short settle
+            // Very far (>88°): 80% of distance, trapezoidal ramp 600→150→400µs
             steps = (int)(cw_dist * STEPS_PER_UNIT * 0.8f);
-            s_step_delay_us = 200;   // fast — 200µs per step
-            settle_ms = 30;
+            multi_step_ramped(steps, true, 600, 150, 400);
+            settle_ms = 10;
         } else if (cw_dist > 200) {
-            // Far (>18°): 60% of distance, medium speed
+            // Far (>18°): 60% of distance, ramp 500→250→400µs
             steps = (int)(cw_dist * STEPS_PER_UNIT * 0.6f);
-            s_step_delay_us = 350;   // medium — 350µs per step
-            settle_ms = 40;
+            multi_step_ramped(steps, true, 500, 250, 400);
+            settle_ms = 20;
         } else if (cw_dist > 50) {
-            // Close (>4.4°): 40% of distance, slower for precision
+            // Close (>4.4°): 40% of distance, ramp 500→350→500µs
             steps = (int)(cw_dist * STEPS_PER_UNIT * 0.4f);
-            s_step_delay_us = 500;   // slow — 500µs per step
-            settle_ms = 50;
+            multi_step_ramped(steps, true, 500, 350, 500);
+            settle_ms = 30;
         } else {
-            // Very close (<4.4°): proportional steps at slow speed for precision
+            // Very close (<4.4°): proportional steps, slow constant speed
             steps = (int)(cw_dist * STEPS_PER_UNIT * 0.5f);
             if (steps < 1) steps = 1;
-            s_step_delay_us = 600;   // very slow — 600µs per step
-            settle_ms = 40;
+            for (int s = 0; s < steps; s++) {
+                one_step_delay(true, 600);
+            }
+            settle_ms = 30;
         }
 
-        if (steps < 1) steps = 1;
-
-        // Execute steps — CW only
-        for (int s = 0; s < steps; s++) {
-            one_step(true);
-        }
-
-        // Variable settle delay for AS5600 to stabilize
+        // Brief settle for AS5600 to stabilize (decel phase already slowed motor)
         vTaskDelay(pdMS_TO_TICKS(settle_ms));
 
         // Log every 5th iteration
@@ -260,9 +300,6 @@ bool stepper_move_to_angle(uint16_t target_raw, int tolerance)
                      iter, current, cw_dist, steps, s_step_delay_us);
         }
     }
-
-    // Restore original step delay
-    s_step_delay_us = original_delay;
 
     if (!converged) {
         as5600_read_raw_angle(&current);

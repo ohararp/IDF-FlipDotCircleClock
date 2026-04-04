@@ -208,7 +208,7 @@ void clock_update_minute(const struct tm *local)
         if (home_offset != 0) {
             // PID closed-loop only — no open-loop bulk move (prevents full-revolution overshoot)
             uint16_t target_raw = as5600_minute_to_raw(minute, home_offset);
-            stepper_move_to_angle(target_raw, 5); // ±5 AS5600 units ≈ ±0.4°
+            stepper_move_to_angle(target_raw, 1); // ±1 AS5600 unit ≈ ±0.09°
             stepper_set_position((minute * STEPPER_STEPS_PER_REV) / 60);
             ESP_LOGI(TAG, "Minute update (PID): %02d → AS5600 tgt %d", minute, target_raw);
             return;

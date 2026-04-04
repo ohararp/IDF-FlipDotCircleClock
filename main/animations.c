@@ -95,7 +95,7 @@ void anim_chaos(void)
 
         // Move minute hand to random hour using PID closed-loop
         uint16_t target_raw = as5600_minute_to_raw(rnd_hour * 5, chaos_home_offset);
-        stepper_move_to_angle(target_raw, 5);
+        stepper_move_to_angle(target_raw, 1);
         stepper_set_position(rnd_hour * STEPS_PER_HOUR);
 
         // Display matching hour on flipdots
@@ -136,7 +136,7 @@ void anim_sync(void)
     for (int h = 1; h <= 12; h++) {
         // Move hand to hour position using PID closed-loop (each hour = 5 minutes)
         uint16_t target_raw = as5600_minute_to_raw(h * 5, home_offset);
-        stepper_move_to_angle(target_raw, 5);
+        stepper_move_to_angle(target_raw, 1);
         stepper_set_position(h * STEPS_PER_HOUR);
 
         // Display matching hour on flipdots

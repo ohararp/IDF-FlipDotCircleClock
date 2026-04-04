@@ -49,17 +49,25 @@ static void neopixel_blink_task(void *arg)
     }
 }
 
-// Task: read local time every second, update OLED with time display
+// Task: read local time every second, update OLED — shows AS5600 angle during calibration
 static void display_task(void *arg)
 {
     struct tm local;
     while (1) {
-        if (timekeeping_get_local_time(&local) == ESP_OK) {
-            // Log local time to serial for debugging
+        if (calibration_is_active() && as5600_is_connected()) {
+            // During calibration: show live AS5600 angle so user can see hand position
+            uint16_t angle;
+            if (as5600_read_raw_angle(&angle) == ESP_OK) {
+                char buf[26];
+                snprintf(buf, sizeof(buf), "CAL: AS5600=%d", angle);
+                oled_terminal_print(buf);
+                ESP_LOGI(TAG, "CAL: AS5600 raw=%d (%.1f deg)", angle, as5600_to_degrees(angle));
+            }
+        } else if (timekeeping_get_local_time(&local) == ESP_OK) {
+            // Normal mode: log local time to serial and update OLED
             ESP_LOGI(TAG, "Local: %04d-%02d-%02d %02d:%02d:%02d",
                      local.tm_year + 1900, local.tm_mon + 1, local.tm_mday,
                      local.tm_hour, local.tm_min, local.tm_sec);
-            // Update OLED with local time (task is suspended during homing/animations)
             if (s_oled_ok) {
                 oled_update_time(&local);
             }
@@ -162,7 +170,7 @@ void app_main(void)
     // Initialize trackers to impossible values so first loop triggers all updates
     int min_old = -1, hr_old = -1;
     struct tm local;
-    button_event_t event;
+    app_button_event_t event;
 
     while (1) {
         // Service flipdot relay hold window — turns off relay when hold period expires
@@ -201,14 +209,15 @@ void app_main(void)
 
         // Check for button events (non-blocking, 100 ms timeout)
         if (buttons_get_event(&event, 100)) {
-            // All button actions acquire the hardware mutex
+            // All button actions: acquire hardware mutex + suspend display task
             if (xSemaphoreTake(s_hw_mutex, pdMS_TO_TICKS(2000))) {
+                if (s_display_task) vTaskSuspend(s_display_task);
+
                 switch (event) {
 
                 case BUTTON_EVENT_A_SHORT:
                     // Re-home: blank display → home motor → restore hour + minute
                     ESP_LOGI(TAG, "Btn A short — re-home sequence");
-                    if (s_display_task) vTaskSuspend(s_display_task);
                     flipdot_power_on();
                     flipdot_blank();
                     vTaskDelay(pdMS_TO_TICKS(500));
@@ -218,7 +227,6 @@ void app_main(void)
                     clock_update_hour(&local);
                     clock_update_minute(&local);
                     vTaskDelay(pdMS_TO_TICKS(2000));
-                    if (s_display_task) vTaskResume(s_display_task);
                     min_old = local.tm_min;
                     hr_old = local.tm_hour;
                     break;
@@ -250,10 +258,8 @@ void app_main(void)
                 case BUTTON_EVENT_B_LONG:
                     // Sync animation placeholder (Step 10) — for now just test all hours
                     ESP_LOGI(TAG, "Btn B long — sync anim (placeholder)");
-                    if (s_display_task) vTaskSuspend(s_display_task);
                     oled_terminal_print("Anim: not yet impl");
                     vTaskDelay(pdMS_TO_TICKS(2000));
-                    if (s_display_task) vTaskResume(s_display_task);
                     break;
 
                 case BUTTON_EVENT_C_SHORT:
@@ -265,31 +271,41 @@ void app_main(void)
                         local.tm_sec = 0;                           // reset seconds
                         ds3231_set_time(&local);                    // write adjusted time back to RTC
                         ESP_LOGI(TAG, "Btn C short — +1 min → %02d:%02d", local.tm_hour, local.tm_min);
-                        clock_update_minute(&local);
+                        // Simple open-loop advance by 1 minute of steps (no AS5600 closed-loop)
+                        int steps_per_min = STEPPER_STEPS_PER_REV / 60; // 213 steps
+                        stepper_multi_step(steps_per_min, true);    // CW
                         min_old = local.tm_min;  // sync tracker to prevent re-trigger
                         hr_old = local.tm_hour;
                     }
                     break;
 
                 case BUTTON_EVENT_C_LONG:
-                    // AS5600 calibration: hold C 2s to enter, hold C 2s again to save
                     if (!calibration_is_active()) {
+                        // Enter calibration — motor stays enabled, user repositions hand
                         ESP_LOGI(TAG, "Btn C long — enter calibration");
-                        if (s_display_task) vTaskSuspend(s_display_task);
                         calibration_enter();
-                    } else {
+                        // Drain any pending button events from this same long press
+                        { app_button_event_t discard;
+                          while (buttons_get_event(&discard, 200)) {} }
+                    } else if (calibration_ready_to_save()) {
+                        // Save calibration — only if >=3s have elapsed since entering
                         ESP_LOGI(TAG, "Btn C long — save calibration");
                         calibration_save();
                         vTaskDelay(pdMS_TO_TICKS(2000)); // hold result on screen
                         // Re-sync minute hand to current time after calibration
                         timekeeping_get_local_time(&local);
                         clock_update_minute(&local);
-                        min_old = local.tm_min;  // sync tracker to prevent re-trigger
+                        min_old = local.tm_min;
                         hr_old = local.tm_hour;
-                        if (s_display_task) vTaskResume(s_display_task);
+                    } else {
+                        // Too soon — ignore (still repositioning hand)
+                        ESP_LOGI(TAG, "Btn C long — too soon, wait 3s after entering cal");
                     }
                     break;
                 }
+
+                // Resume display task after any button action completes
+                if (s_display_task) vTaskResume(s_display_task);
                 xSemaphoreGive(s_hw_mutex);
             }
         }

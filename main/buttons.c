@@ -1,132 +1,102 @@
+// Button handling using espressif/button component (v4.1.6)
+// https://components.espressif.com/components/espressif/button
+// https://github.com/espressif/esp-iot-solution/tree/master/components/button
+// Provides hardware-debounced GPIO buttons with configurable short/long press.
+
 #include "buttons.h"
 #include "gpio_config.h"
 #include "esp_log.h"
-#include "driver/gpio.h"
+#include "iot_button.h"
+#include "button_gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
-#include "freertos/timers.h"
-#include "esp_timer.h"
 
 static const char *TAG = "buttons";
 
-// FreeRTOS queue for button events (ISR/timer → main task)
+// FreeRTOS queue for button events (callbacks → main task)
 static QueueHandle_t s_button_queue;
 
-// Long press threshold: 2.0 seconds — fires while still held (no release needed)
+// Long press threshold in milliseconds (fires while button is still held)
 #define LONG_PRESS_MS 2000
 
-// Debounce: minimum 200 ms between accepted presses per button
-#define DEBOUNCE_US 200000
+// ── Callback helpers: each posts an event to the queue ───────────────────────
 
-// Per-button state for press tracking and long-press timer
-typedef struct {
-    int gpio;                   // GPIO pin number for this button
-    int64_t press_time_us;      // timestamp when button was pressed (falling edge)
-    int64_t last_event_us;      // last accepted event time for debounce
-    bool long_fired;            // true if long-press already fired for this press cycle
-    TimerHandle_t long_timer;   // FreeRTOS timer that fires after 2s hold
-    button_event_t short_event; // event type to emit on short press (release < 2s)
-    button_event_t long_event;  // event type to emit on long press (held >= 2s)
-} button_state_t;
-
-static button_state_t s_btn_a, s_btn_b, s_btn_c;
-
-// Timer callback: fires after 2s hold — emit long-press event while button is still held
-static void long_press_timer_cb(TimerHandle_t timer)
+// Generic callback that posts the event stored in usr_data to the queue
+static void button_cb(void *btn_handle, void *usr_data)
 {
-    button_state_t *btn = (button_state_t *)pvTimerGetTimerID(timer);
+    app_button_event_t event = (app_button_event_t)(intptr_t)usr_data;
+    xQueueSend(s_button_queue, &event, 0); // non-blocking post
+}
 
-    // Verify button is still held (pin LOW = pressed with pull-up)
-    if (gpio_get_level(btn->gpio) == 0) {
-        btn->long_fired = true; // mark so release doesn't also fire short press
-        xQueueSend(s_button_queue, &btn->long_event, 0);
+// ── Helper: create one GPIO button with short + long press callbacks ─────────
+
+static esp_err_t create_button(int gpio, app_button_event_t short_event, app_button_event_t long_event)
+{
+    // Button config: set long press threshold to 2.0s
+    button_config_t btn_cfg = {
+        .long_press_time = LONG_PRESS_MS,   // 2000 ms hold triggers long press
+        .short_press_time = 0,              // use default short press time
+    };
+
+    // GPIO config: active LOW (pull-up buttons, pressed = GND)
+    button_gpio_config_t gpio_cfg = {
+        .gpio_num = gpio,
+        .active_level = 0,                  // LOW when pressed
+    };
+
+    button_handle_t handle = NULL;
+    esp_err_t ret = iot_button_new_gpio_device(&btn_cfg, &gpio_cfg, &handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create button on GPIO %d: %s", gpio, esp_err_to_name(ret));
+        return ret;
     }
-}
 
-// ISR handler: falling edge = start timer, rising edge = short press or cancel
-static void IRAM_ATTR button_isr(void *arg)
-{
-    button_state_t *btn = (button_state_t *)arg;
-    int64_t now = esp_timer_get_time();
-
-    // Debounce: ignore events too close together
-    if (now - btn->last_event_us < DEBOUNCE_US) return;
-    btn->last_event_us = now;
-
-    int level = gpio_get_level(btn->gpio);
-
-    if (level == 0) {
-        // Falling edge: button pressed — start long-press timer
-        btn->press_time_us = now;
-        btn->long_fired = false;
-        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-        xTimerStartFromISR(btn->long_timer, &xHigherPriorityTaskWoken);
-        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-    } else {
-        // Rising edge: button released — stop timer, emit short press if long didn't fire
-        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-        xTimerStopFromISR(btn->long_timer, &xHigherPriorityTaskWoken);
-
-        if (!btn->long_fired) {
-            // Long press didn't fire, so this is a short press
-            xQueueSendFromISR(s_button_queue, &btn->short_event, &xHigherPriorityTaskWoken);
-        }
-        btn->press_time_us = 0;
-        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    // Register single click callback (fires on release after short press)
+    ret = iot_button_register_cb(handle, BUTTON_SINGLE_CLICK, NULL, button_cb, (void *)(intptr_t)short_event);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register short press on GPIO %d", gpio);
+        return ret;
     }
+
+    // Register long press start callback (fires while button is still held at 2s threshold)
+    button_event_args_t long_args = { .long_press.press_time = LONG_PRESS_MS };
+    ret = iot_button_register_cb(handle, BUTTON_LONG_PRESS_START, &long_args, button_cb, (void *)(intptr_t)long_event);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register long press on GPIO %d", gpio);
+        return ret;
+    }
+
+    return ESP_OK;
 }
 
-// Initialize a single button: configure state, create long-press timer
-static void init_button(button_state_t *btn, int gpio, button_event_t short_ev, button_event_t long_ev, const char *name)
-{
-    btn->gpio = gpio;
-    btn->press_time_us = 0;
-    btn->last_event_us = 0;
-    btn->long_fired = false;
-    btn->short_event = short_ev;
-    btn->long_event = long_ev;
+// ── Public API ───────────────────────────────────────────────────────────────
 
-    // Create one-shot timer for long-press detection (fires once after 2s hold)
-    btn->long_timer = xTimerCreate(name, pdMS_TO_TICKS(LONG_PRESS_MS), pdFALSE, btn, long_press_timer_cb);
-}
-
-// Configure all 3 buttons (A=GPIO1, B=GPIO38, C=GPIO33) with pull-up and both-edge ISR
+// Configure all 3 buttons using espressif/button component with debounce + short/long detection
 esp_err_t buttons_init(void)
 {
-    // Create queue for button events (depth 8 — handles burst presses)
-    s_button_queue = xQueueCreate(8, sizeof(button_event_t));
+    // Create queue for button events (depth 8)
+    s_button_queue = xQueueCreate(8, sizeof(app_button_event_t));
     if (!s_button_queue) {
         ESP_LOGE(TAG, "Failed to create button event queue");
         return ESP_FAIL;
     }
 
-    // Initialize per-button state and long-press timers
-    init_button(&s_btn_a, PIN_BUTTON_A, BUTTON_EVENT_A_SHORT, BUTTON_EVENT_A_LONG, "btn_a");
-    init_button(&s_btn_b, PIN_BUTTON_B, BUTTON_EVENT_B_SHORT, BUTTON_EVENT_B_LONG, "btn_b");
-    init_button(&s_btn_c, PIN_BUTTON_C, BUTTON_EVENT_C_SHORT, BUTTON_EVENT_C_LONG, "btn_c");
+    // Create Button A (GPIO 1): short = re-home, long = WiFi reconnect
+    ESP_ERROR_CHECK(create_button(PIN_BUTTON_A, BUTTON_EVENT_A_SHORT, BUTTON_EVENT_A_LONG));
 
-    // All 3 buttons: input with internal pull-up, interrupt on both edges
-    gpio_config_t btn_cfg = {
-        .pin_bit_mask = (1ULL << PIN_BUTTON_A) | (1ULL << PIN_BUTTON_B) | (1ULL << PIN_BUTTON_C),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .intr_type = GPIO_INTR_ANYEDGE, // both press and release
-    };
-    gpio_config(&btn_cfg);
+    // Create Button B (GPIO 38): short = +1 hour, long = sync animation
+    ESP_ERROR_CHECK(create_button(PIN_BUTTON_B, BUTTON_EVENT_B_SHORT, BUTTON_EVENT_B_LONG));
 
-    // Install GPIO ISR service and attach handlers
-    gpio_install_isr_service(0);
-    gpio_isr_handler_add(PIN_BUTTON_A, button_isr, &s_btn_a);
-    gpio_isr_handler_add(PIN_BUTTON_B, button_isr, &s_btn_b);
-    gpio_isr_handler_add(PIN_BUTTON_C, button_isr, &s_btn_c);
+    // Create Button C (GPIO 33): short = +1 minute, long = AS5600 calibration
+    ESP_ERROR_CHECK(create_button(PIN_BUTTON_C, BUTTON_EVENT_C_SHORT, BUTTON_EVENT_C_LONG));
 
-    ESP_LOGI(TAG, "Buttons A=%d B=%d C=%d (short/long, 2.0s hold-to-trigger)",
-             PIN_BUTTON_A, PIN_BUTTON_B, PIN_BUTTON_C);
+    ESP_LOGI(TAG, "Buttons A=%d B=%d C=%d (espressif/button, short+long, %d ms threshold)",
+             PIN_BUTTON_A, PIN_BUTTON_B, PIN_BUTTON_C, LONG_PRESS_MS);
     return ESP_OK;
 }
 
 // Check for a button event; blocks up to timeout_ms (0 = non-blocking)
-bool buttons_get_event(button_event_t *event, uint32_t timeout_ms)
+bool buttons_get_event(app_button_event_t *event, uint32_t timeout_ms)
 {
     return xQueueReceive(s_button_queue, event, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 }

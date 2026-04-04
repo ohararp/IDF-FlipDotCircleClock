@@ -32,7 +32,8 @@ static void one_step(bool clockwise)
 {
     set_direction(clockwise);
     gpio_set_level(PIN_STEPPER_STEP, 1); // rising edge triggers TMC2209 step
-    gpio_set_level(PIN_STEPPER_STEP, 0); // return low immediately
+    esp_rom_delay_us(2);                 // 2 µs minimum pulse width for TMC2209
+    gpio_set_level(PIN_STEPPER_STEP, 0); // return low
     esp_rom_delay_us(s_step_delay_us);   // inter-step delay (blocks, µs-precise)
 
     // Update position counter with wrap-around at full revolution
@@ -189,7 +190,10 @@ bool stepper_move_to_angle(uint16_t target_raw, int tolerance)
 
     stepper_enable();
     int steps_taken = 0;
-    const int max_steps = 1000; // safety limit to prevent infinite loops
+    const int max_steps = 13000; // safety limit — slightly more than one full revolution (12800)
+
+    // Log initial state for debugging
+    ESP_LOGI(TAG, "move_to_angle: target=%d tol=%d", target_raw, tolerance);
 
     while (steps_taken < max_steps) {
         // Read current AS5600 angle
@@ -202,21 +206,31 @@ bool stepper_move_to_angle(uint16_t target_raw, int tolerance)
         int diff = as5600_angle_diff(current, target_raw);
         int abs_diff = abs(diff);
 
+        // Log every sensor read for debugging convergence
+        ESP_LOGD(TAG, "m2a: cur=%d tgt=%d diff=%d steps=%d", current, target_raw, diff, steps_taken);
+
         // Check if within tolerance — target reached
         if (abs_diff <= tolerance) {
             s_step_now = as5600_to_steps(current); // sync step counter with encoder
+            ESP_LOGI(TAG, "move_to_angle: converged at %d (diff=%d, %d steps)", current, diff, steps_taken);
             return true;
         }
 
-        // Choose batch size based on distance to target
-        bool cw = (diff > 0);
+        // Detect oscillation: if we've taken >6400 steps (half rev) something is wrong
+        if (steps_taken > STEPPER_STEPS_PER_REV / 2 && abs_diff > tolerance * 4) {
+            ESP_LOGW(TAG, "move_to_angle: likely oscillating, cur=%d tgt=%d diff=%d", current, target_raw, diff);
+            return false;
+        }
+
+        // Choose direction — AS5600 is inverted relative to stepper (CW motor = decreasing angle)
+        bool cw = (diff < 0);
         int batch;
         if (abs_diff > 200) {
-            batch = 50;       // far: 50 steps (~16 AS5600 units) between reads
+            batch = 30;       // far: 30 steps between reads (conservative)
         } else if (abs_diff > 50) {
-            batch = 15;       // medium: 15 steps between reads
+            batch = 10;       // medium: 10 steps between reads
         } else if (abs_diff > tolerance * 2) {
-            batch = 5;        // close: 5 steps between reads
+            batch = 3;        // close: 3 steps between reads
         } else {
             batch = 1;        // very close: single-step fine-tuning
         }

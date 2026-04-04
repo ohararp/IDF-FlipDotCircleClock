@@ -5,11 +5,18 @@
 #include "nvm_storage.h"
 #include "oled_display.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 static const char *TAG = "calibration";
 
 // Track whether we're currently in calibration mode
 static bool s_cal_active = false;
+
+// Timestamp when calibration was entered — used to enforce minimum 3s before save
+static int64_t s_enter_time_us = 0;
+
+// Minimum time between enter and save (3 seconds) to prevent accidental immediate save
+#define CAL_MIN_HOLD_US 3000000
 
 // Enter calibration mode — motor stays enabled so user can position hand against holding torque
 esp_err_t calibration_enter(void)
@@ -21,11 +28,19 @@ esp_err_t calibration_enter(void)
     }
 
     s_cal_active = true;
+    s_enter_time_us = esp_timer_get_time(); // record when we entered for save guard
     stepper_enable(); // keep motor enabled — user positions hand against holding torque
     oled_terminal_print("CAL: move to 12:00");
     oled_terminal_print("CAL: hold C to save");
     ESP_LOGI(TAG, "Calibration mode — position hand to 12 o'clock, hold C to save");
     return ESP_OK;
+}
+
+// Returns true if enough time has elapsed since entering calibration to accept a save
+bool calibration_ready_to_save(void)
+{
+    if (!s_cal_active) return false;
+    return (esp_timer_get_time() - s_enter_time_us) >= CAL_MIN_HOLD_US;
 }
 
 // Read current AS5600 angle, save as 12 o'clock reference to NVS

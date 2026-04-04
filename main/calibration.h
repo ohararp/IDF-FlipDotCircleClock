@@ -16,5 +16,8 @@ esp_err_t calibration_cancel(void);
 // Load saved AS5600 calibration offset from NVS (returns 0 if uncalibrated)
 uint16_t calibration_get_offset(void);
 
+// Returns true if enough time (3s) has elapsed since entering calibration to accept a save
+bool calibration_ready_to_save(void);
+
 // Check if currently in calibration mode
 bool calibration_is_active(void);

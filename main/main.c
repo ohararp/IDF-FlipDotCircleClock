@@ -249,12 +249,10 @@ void app_main(void)
                     break;
 
                 case BUTTON_EVENT_A_LONG:
-                    // Chaos animation: random hour positions with motor + flipdot
-                    ESP_LOGI(TAG, "Btn A long — chaos animation");
-                    anim_chaos();
-                    timekeeping_get_local_time(&local);
-                    min_old = local.tm_min;
-                    hr_old = local.tm_hour;
+                    // Placeholder — reserved for future use
+                    ESP_LOGI(TAG, "Btn A long — unassigned");
+                    oled_terminal_print("A long: unassigned");
+                    vTaskDelay(pdMS_TO_TICKS(1000));
                     break;
 
                 case BUTTON_EVENT_B_SHORT:
@@ -275,12 +273,10 @@ void app_main(void)
                     break;
 
                 case BUTTON_EVENT_B_LONG:
-                    // Sync animation: synchronized hand + flipdot sweep through all 12 hours
-                    ESP_LOGI(TAG, "Btn B long — sync animation");
-                    anim_sync();
-                    timekeeping_get_local_time(&local);
-                    min_old = local.tm_min;
-                    hr_old = local.tm_hour;
+                    // Placeholder — reserved for future use
+                    ESP_LOGI(TAG, "Btn B long — unassigned");
+                    oled_terminal_print("B long: unassigned");
+                    vTaskDelay(pdMS_TO_TICKS(1000));
                     break;
 
                 case BUTTON_EVENT_C_SHORT:

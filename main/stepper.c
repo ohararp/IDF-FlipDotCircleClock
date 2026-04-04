@@ -158,12 +158,12 @@ esp_err_t stepper_find_home(void)
     }
     s_step_now = 0;
 
-    // TODO: PID fine-tune disabled until AS5600 reads are verified
-    if (false && as5600_is_connected()) {
+    // PID fine-tune: if AS5600 is connected and calibrated, move to exact calibrated angle
+    if (as5600_is_connected()) {
         uint16_t home_angle = calibration_get_offset();
         if (home_angle != 0) {
             home_log("Home: PID tune to %d", home_angle);
-            if (stepper_move_to_angle(home_angle, 100)) {
+            if (stepper_move_to_angle(home_angle, 5)) { // ±5 AS5600 units ≈ ±0.4°
                 s_step_now = 0; // confirmed at 12 o'clock
                 home_log("Home: PID done!");
             } else {
@@ -189,11 +189,11 @@ bool stepper_move_to_angle(uint16_t target_raw, int tolerance)
     // Create PID controller — positional mode, tuned for stepper + AS5600
     // AS5600 ratio: ~3.12 motor steps per AS5600 unit (12800 steps / 4096 units)
     pid_ctrl_parameter_t pid_params = {
-        .kp = 0.1f,              // very conservative: 0.1 steps per AS5600 unit of error
+        .kp = 0.5f,              // 0.5 steps per AS5600 unit of error (~1.6 steps/degree)
         .ki = 0.0f,              // no integral — stepper has no steady-state error
-        .kd = 0.05f,             // light derivative dampening
-        .max_output = 50.0f,     // max 50 steps per iteration (prevents overshoot)
-        .min_output = -50.0f,    // allow both CW and CCW
+        .kd = 0.1f,              // derivative dampens oscillation near target
+        .max_output = 200.0f,    // max 200 steps per iteration
+        .min_output = -200.0f,   // allow both CW and CCW
         .max_integral = 0.0f,    // no integral accumulation
         .min_integral = 0.0f,
         .cal_type = PID_CAL_TYPE_POSITIONAL,
@@ -219,36 +219,33 @@ bool stepper_move_to_angle(uint16_t target_raw, int tolerance)
         // Read current AS5600 angle
         if (as5600_read_raw_angle(&current) != ESP_OK) break;
 
-        // Calculate shortest-path error (positive = CW in AS5600 space)
-        float error = (float)as5600_angle_diff(current, target_raw);
+        // Calculate CW-only distance to target (always positive, wraps around 4096)
+        float error = (float)((target_raw - current + 4096) % 4096);
 
         // Check if within tolerance — target reached
-        if (fabsf(error) <= (float)tolerance) {
+        if (error <= (float)tolerance || error >= (4096.0f - (float)tolerance)) {
             s_step_now = as5600_to_steps(current);
             ESP_LOGI(TAG, "PID converged: cur=%d err=%.0f iter=%d", current, error, iter);
             converged = true;
             break;
         }
 
-        // Compute PID output: positive output = CW in AS5600 space
+        // Compute PID output (always positive since error is always positive CW distance)
         float output = 0;
         pid_compute(pid, error, &output);
 
-        // Convert PID output to step direction and count
-        // CW motor = INCREASING AS5600 angle (confirmed from logs)
+        // Always step CW — take abs(output) steps
         int steps = (int)fabsf(output);
         if (steps == 0) {
-            // PID says don't move — close enough, declare converged
             s_step_now = as5600_to_steps(current);
             ESP_LOGI(TAG, "PID converged (deadband): cur=%d err=%.0f iter=%d", current, error, iter);
             converged = true;
             break;
         }
-        bool cw = (output > 0);   // positive output = CW motor (increases AS5600 angle)
 
-        // Execute steps
+        // Execute steps — CW only
         for (int s = 0; s < steps; s++) {
-            one_step(cw);
+            one_step(true);
         }
 
         // Settle delay: let motor physically move and AS5600 output stabilize
@@ -256,8 +253,8 @@ bool stepper_move_to_angle(uint16_t target_raw, int tolerance)
 
         // Log every 10th iteration for tuning visibility
         if (iter % 10 == 0) {
-            ESP_LOGI(TAG, "PID[%d]: cur=%d err=%.0f out=%.1f steps=%d cw=%d",
-                     iter, current, error, output, steps, cw);
+            ESP_LOGI(TAG, "PID[%d]: cur=%d err=%.0f out=%.1f steps=%d CW",
+                     iter, current, error, output, steps);
         }
     }
 

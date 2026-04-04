@@ -203,27 +203,27 @@ esp_err_t timekeeping_sync_from_ntp(time_t utc_epoch)
 void clock_update_minute(const struct tm *local)
 {
     int minute = local->tm_min;
-    int target_steps = (minute * STEPPER_STEPS_PER_REV) / 60;
-
-    // Open-loop: calculate CW steps needed from current position
-    int current_pos = stepper_get_position();
-    int steps_needed = (target_steps - current_pos + STEPPER_STEPS_PER_REV) % STEPPER_STEPS_PER_REV;
-    if (steps_needed > 0) {
-        stepper_multi_step(steps_needed, true); // CW bulk move
-    }
-    stepper_set_position(target_steps);
-
-    // TODO: PID fine-tune disabled until AS5600 reads are verified
-    if (false && as5600_is_connected()) {
+    if (as5600_is_connected()) {
         uint16_t home_offset = calibration_get_offset();
         if (home_offset != 0) {
+            // PID closed-loop only — no open-loop bulk move (prevents full-revolution overshoot)
             uint16_t target_raw = as5600_minute_to_raw(minute, home_offset);
-            stepper_move_to_angle(target_raw, 100);
+            stepper_move_to_angle(target_raw, 5); // ±5 AS5600 units ≈ ±0.4°
+            stepper_set_position((minute * STEPPER_STEPS_PER_REV) / 60);
+            ESP_LOGI(TAG, "Minute update (PID): %02d → AS5600 tgt %d", minute, target_raw);
+            return;
         }
     }
 
-    ESP_LOGI(TAG, "Minute update: %02d → step %d (from %d, moved %d)",
-             minute, target_steps, current_pos, steps_needed);
+    // Open-loop fallback: CW step counting (only if AS5600 unavailable/uncalibrated)
+    int target_steps = (minute * STEPPER_STEPS_PER_REV) / 60;
+    int current_pos = stepper_get_position();
+    int steps_needed = (target_steps - current_pos + STEPPER_STEPS_PER_REV) % STEPPER_STEPS_PER_REV;
+    if (steps_needed > 0) {
+        stepper_multi_step(steps_needed, true);
+    }
+    stepper_set_position(target_steps);
+    ESP_LOGI(TAG, "Minute update (open-loop): %02d → step %d (moved %d)", minute, target_steps, steps_needed);
 }
 
 // Update flip-dot display with current hour (12-hour format)

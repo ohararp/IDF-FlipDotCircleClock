@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include "calibration.h"
 #include "as5600.h"
 #include "stepper.h"
@@ -10,7 +11,7 @@ static const char *TAG = "calibration";
 // Track whether we're currently in calibration mode
 static bool s_cal_active = false;
 
-// Disable motor and enter calibration mode so user can manually position the hand
+// Enter calibration mode — motor stays enabled so user can position hand against holding torque
 esp_err_t calibration_enter(void)
 {
     if (!as5600_is_connected()) {
@@ -20,14 +21,14 @@ esp_err_t calibration_enter(void)
     }
 
     s_cal_active = true;
-    stepper_disable(); // release motor so hand can be moved by hand
+    stepper_enable(); // keep motor enabled — user positions hand against holding torque
     oled_terminal_print("CAL: move to 12:00");
-    oled_terminal_print("CAL: press C to save");
-    ESP_LOGI(TAG, "Calibration mode — move hand to 12 o'clock, press C to save");
+    oled_terminal_print("CAL: hold C to save");
+    ESP_LOGI(TAG, "Calibration mode — position hand to 12 o'clock, hold C to save");
     return ESP_OK;
 }
 
-// Read current AS5600 angle, save as 12 o'clock reference to NVS, re-enable motor
+// Read current AS5600 angle, save as 12 o'clock reference to NVS
 esp_err_t calibration_save(void)
 {
     if (!s_cal_active) {
@@ -41,7 +42,6 @@ esp_err_t calibration_save(void)
         ESP_LOGE(TAG, "Failed to read AS5600 during calibration");
         oled_terminal_print("CAL: read failed!");
         s_cal_active = false;
-        stepper_enable();
         return ret;
     }
 
@@ -51,21 +51,21 @@ esp_err_t calibration_save(void)
         ESP_LOGE(TAG, "Failed to save calibration to NVS");
         oled_terminal_print("CAL: save failed!");
         s_cal_active = false;
-        stepper_enable();
         return ret;
     }
 
+    char buf[26];
+    snprintf(buf, sizeof(buf), "CAL: saved %d", angle);
+    oled_terminal_print(buf);
     ESP_LOGI(TAG, "Calibration saved: AS5600 angle %d (%.1f deg) = 12 o'clock",
              angle, as5600_to_degrees(angle));
-    oled_terminal_print("CAL: saved!");
 
     s_cal_active = false;
-    stepper_enable();
     stepper_set_position(0); // we're at 12 o'clock now
     return ESP_OK;
 }
 
-// Cancel calibration without saving, re-enable motor
+// Cancel calibration without saving
 esp_err_t calibration_cancel(void)
 {
     if (!s_cal_active) {
@@ -73,7 +73,6 @@ esp_err_t calibration_cancel(void)
     }
 
     s_cal_active = false;
-    stepper_enable();
     oled_terminal_print("CAL: cancelled");
     ESP_LOGI(TAG, "Calibration cancelled");
     return ESP_OK;

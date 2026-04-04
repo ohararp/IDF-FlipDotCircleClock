@@ -3,6 +3,7 @@
 #include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_app_desc.h"
 #include "neopixel.h"
@@ -14,6 +15,7 @@
 #include "calibration.h"
 #include "buttons.h"
 #include "flipdot.h"
+#include "gpio_config.h"
 #include "timekeeping.h"
 
 static const char *TAG = "main";
@@ -23,6 +25,12 @@ static bool s_oled_ok = false;
 
 // Handle for the display task so it can be suspended/resumed during homing/animations
 static TaskHandle_t s_display_task = NULL;
+
+// Mutex protecting stepper motor and flipdot hardware from concurrent access
+static SemaphoreHandle_t s_hw_mutex = NULL;
+
+// Track current displayed hour so +1 hour can wrap correctly
+static int s_current_hour_12 = 0;
 
 // ── Background tasks ─────────────────────────────────────────────────────────
 
@@ -69,7 +77,7 @@ static void setup(void)
     const esp_app_desc_t *app_desc = esp_app_get_description();
     ESP_LOGI(TAG, "FlipDotCircleClock v%s starting...", app_desc->version);
 
-    // 1. Persistent config
+    // 1. Persistent config + timekeeping
     ESP_ERROR_CHECK(nvm_init());
     ESP_ERROR_CHECK(timekeeping_init());
 
@@ -128,13 +136,18 @@ static void setup(void)
     if (timekeeping_get_local_time(&local) == ESP_OK) {
         clock_update_hour(&local);
         clock_update_minute(&local);
+        s_current_hour_12 = local.tm_hour % 12;
+        if (s_current_hour_12 == 0) s_current_hour_12 = 12;
         ESP_LOGI(TAG, "Clock set to %02d:%02d", local.tm_hour, local.tm_min);
     }
 
-    // 7. Buttons (B + C with ISR + debounce)
+    // 7. Hardware mutex — protects stepper + flipdot from concurrent access
+    s_hw_mutex = xSemaphoreCreateMutex();
+
+    // 8. Buttons A (GPIO 1), B (GPIO 38), C (GPIO 33) with short/long press detection
     ESP_ERROR_CHECK(buttons_init());
 
-    // 8. Background display task (1 s OLED + serial refresh)
+    // 9. Background display task (1 s OLED + serial refresh)
     xTaskCreate(display_task, "display", 4096, NULL, 3, &s_display_task);
 }
 
@@ -144,7 +157,7 @@ void app_main(void)
 {
     setup();
 
-    // ── Main clock loop: RTC comparison-based scheduling ─────────────────────
+    // ── Main clock loop: RTC comparison-based scheduling + button handling ────
 
     // Initialize trackers to impossible values so first loop triggers all updates
     int min_old = -1, hr_old = -1;
@@ -157,51 +170,114 @@ void app_main(void)
 
         // Read local time for scheduling checks
         if (timekeeping_get_local_time(&local) == ESP_OK) {
-            // Minute boundary crossed → move minute hand
+            // Minute boundary crossed → move minute hand (with mutex)
             if (local.tm_min != min_old) {
-                ESP_LOGI(TAG, "Minute changed: %02d → %02d", min_old, local.tm_min);
-                clock_update_minute(&local);
-                min_old = local.tm_min;
+                if (xSemaphoreTake(s_hw_mutex, pdMS_TO_TICKS(500))) {
+                    ESP_LOGI(TAG, "Minute changed: %02d → %02d", min_old, local.tm_min);
+                    clock_update_minute(&local);
+                    min_old = local.tm_min;
+                    xSemaphoreGive(s_hw_mutex);
+                }
             }
 
-            // Hour boundary crossed → update flipdot display + re-home + position minute
+            // Hour boundary crossed → update flipdot + re-home + position minute (with mutex)
             if (local.tm_hour != hr_old) {
-                ESP_LOGI(TAG, "Hour changed: %02d → %02d", hr_old, local.tm_hour);
-                if (s_display_task) vTaskSuspend(s_display_task);
-                clock_update_hour(&local);
-                stepper_find_home();
-                clock_update_minute(&local);
-                vTaskDelay(pdMS_TO_TICKS(2000)); // hold OLED terminal for 2 s
-                if (s_display_task) vTaskResume(s_display_task);
-                hr_old = local.tm_hour;
-                min_old = local.tm_min; // prevent double minute update
+                if (xSemaphoreTake(s_hw_mutex, pdMS_TO_TICKS(500))) {
+                    ESP_LOGI(TAG, "Hour changed: %02d → %02d", hr_old, local.tm_hour);
+                    if (s_display_task) vTaskSuspend(s_display_task);
+                    clock_update_hour(&local);
+                    stepper_find_home();
+                    clock_update_minute(&local);
+                    s_current_hour_12 = local.tm_hour % 12;
+                    if (s_current_hour_12 == 0) s_current_hour_12 = 12;
+                    vTaskDelay(pdMS_TO_TICKS(2000)); // hold OLED terminal for 2 s
+                    if (s_display_task) vTaskResume(s_display_task);
+                    hr_old = local.tm_hour;
+                    min_old = local.tm_min; // prevent double minute update
+                    xSemaphoreGive(s_hw_mutex);
+                }
             }
         }
 
         // Check for button events (non-blocking, 100 ms timeout)
         if (buttons_get_event(&event, 100)) {
-            switch (event) {
-            case BUTTON_EVENT_B_PRESS:
-                // Flipdot test: blank → pause → show hour 12 → pause → relay off
-                ESP_LOGI(TAG, "Button B — flipdot test");
-                flipdot_power_on();
-                flipdot_blank();
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                flipdot_show_hour(12);
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                flipdot_power_off();
-                break;
-            case BUTTON_EVENT_C_PRESS:
-                // Re-home motor — suspend display task for OLED terminal
-                ESP_LOGI(TAG, "Button C — re-homing");
-                if (s_display_task) vTaskSuspend(s_display_task);
-                stepper_find_home();
-                clock_update_minute(&local); // reposition after homing
-                vTaskDelay(pdMS_TO_TICKS(3000)); // hold terminal for 3 s
-                if (s_display_task) vTaskResume(s_display_task);
-                min_old = local.tm_min;  // sync trackers
-                hr_old = local.tm_hour;
-                break;
+            // All button actions acquire the hardware mutex
+            if (xSemaphoreTake(s_hw_mutex, pdMS_TO_TICKS(2000))) {
+                switch (event) {
+
+                case BUTTON_EVENT_A_SHORT:
+                    // Re-home: blank display → home motor → restore hour + minute
+                    ESP_LOGI(TAG, "Btn A short — re-home sequence");
+                    if (s_display_task) vTaskSuspend(s_display_task);
+                    flipdot_power_on();
+                    flipdot_blank();
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                    flipdot_power_off();
+                    stepper_find_home();
+                    timekeeping_get_local_time(&local);
+                    clock_update_hour(&local);
+                    clock_update_minute(&local);
+                    vTaskDelay(pdMS_TO_TICKS(2000));
+                    if (s_display_task) vTaskResume(s_display_task);
+                    min_old = local.tm_min;
+                    hr_old = local.tm_hour;
+                    break;
+
+                case BUTTON_EVENT_A_LONG:
+                    // Reserved for WiFi reconnect (Step 12) — no-op for now
+                    ESP_LOGI(TAG, "Btn A long — reserved (WiFi reconnect)");
+                    oled_terminal_print("WiFi: not yet impl");
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    break;
+
+                case BUTTON_EVENT_B_SHORT:
+                    // +1 hour: advance flipdot display, wrap 12→1
+                    s_current_hour_12 = (s_current_hour_12 % 12) + 1;
+                    ESP_LOGI(TAG, "Btn B short — +1 hour → %d", s_current_hour_12);
+                    flipdot_power_on();
+                    flipdot_show_hour(s_current_hour_12);
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                    flipdot_power_off();
+                    break;
+
+                case BUTTON_EVENT_B_LONG:
+                    // Sync animation placeholder (Step 10) — for now just test all hours
+                    ESP_LOGI(TAG, "Btn B long — sync anim (placeholder)");
+                    if (s_display_task) vTaskSuspend(s_display_task);
+                    oled_terminal_print("Anim: not yet impl");
+                    vTaskDelay(pdMS_TO_TICKS(2000));
+                    if (s_display_task) vTaskResume(s_display_task);
+                    break;
+
+                case BUTTON_EVENT_C_SHORT:
+                    // +1 minute: advance minute hand by 1 minute worth of steps (ignored during calibration)
+                    if (!calibration_is_active()) {
+                        ESP_LOGI(TAG, "Btn C short — +1 minute");
+                        int steps_per_min = STEPPER_STEPS_PER_REV / 60;
+                        stepper_multi_step(steps_per_min, true); // CW
+                    }
+                    break;
+
+                case BUTTON_EVENT_C_LONG:
+                    // AS5600 calibration: hold C 2s to enter, hold C 2s again to save
+                    if (!calibration_is_active()) {
+                        ESP_LOGI(TAG, "Btn C long — enter calibration");
+                        if (s_display_task) vTaskSuspend(s_display_task);
+                        calibration_enter();
+                    } else {
+                        ESP_LOGI(TAG, "Btn C long — save calibration");
+                        calibration_save();
+                        vTaskDelay(pdMS_TO_TICKS(2000)); // hold result on screen
+                        // Re-sync minute hand to current time after calibration
+                        timekeeping_get_local_time(&local);
+                        clock_update_minute(&local);
+                        min_old = local.tm_min;  // sync tracker to prevent re-trigger
+                        hr_old = local.tm_hour;
+                        if (s_display_task) vTaskResume(s_display_task);
+                    }
+                    break;
+                }
+                xSemaphoreGive(s_hw_mutex);
             }
         }
     }

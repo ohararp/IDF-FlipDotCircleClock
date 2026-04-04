@@ -206,11 +206,19 @@ void clock_update_minute(const struct tm *local)
     int target_steps = (minute * STEPPER_STEPS_PER_REV) / 60;
 
     if (as5600_is_connected()) {
-        // Closed-loop: use AS5600 for precise positioning
+        // Closed-loop: use AS5600 calibration for precise absolute positioning
         uint16_t home_offset = calibration_get_offset();
         uint16_t target_raw = as5600_minute_to_raw(minute, home_offset);
 
-        // Bulk CW move first, then fine-tune with AS5600 feedback
+        // First: if at home (minute 0), align to calibrated 12 o'clock via AS5600
+        if (minute == 0 && home_offset != 0) {
+            stepper_move_to_angle(home_offset, 15); // move to calibrated 12:00
+            stepper_set_position(0);
+            ESP_LOGI(TAG, "Aligned to calibrated 12:00 (AS5600 raw=%d)", home_offset);
+            return;
+        }
+
+        // Bulk CW move first (open-loop estimate), then fine-tune with AS5600 feedback
         int current_pos = stepper_get_position();
         int steps_needed = (target_steps - current_pos + STEPPER_STEPS_PER_REV) % STEPPER_STEPS_PER_REV;
         if (steps_needed > 0) {

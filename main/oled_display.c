@@ -2,6 +2,7 @@
 #include <string.h>
 #include "oled_display.h"
 #include "esp_log.h"
+#include "qrcode.h"
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -55,9 +56,14 @@ static uint8_t u8x8_byte_i2c_cb(u8x8_t *u8x8, uint8_t msg,
         break;
 
     case U8X8_MSG_BYTE_END_TRANSFER:
-        // Transmit accumulated buffer to OLED in one I2C write
+        // Transmit accumulated buffer to OLED — retry on timeout (BLE stack can cause contention)
         if (buf_idx > 0 && s_oled_dev != NULL) {
-            esp_err_t ret = i2c_master_transmit(s_oled_dev, buffer, buf_idx, 100);
+            esp_err_t ret;
+            for (int attempt = 0; attempt < 3; attempt++) {
+                ret = i2c_master_transmit(s_oled_dev, buffer, buf_idx, 500);
+                if (ret == ESP_OK) break;
+                vTaskDelay(pdMS_TO_TICKS(10)); // brief pause before retry
+            }
             if (ret != ESP_OK) {
                 ESP_LOGE(TAG, "I2C transmit failed: %s", esp_err_to_name(ret));
                 return 0;
@@ -199,4 +205,64 @@ void oled_terminal_print(const char *line)
         u8g2_DrawStr(&s_u8g2, 0, 7 + (i * 8), s_term_lines[buf_idx]); // 8px line height
     }
     u8g2_SendBuffer(&s_u8g2); // push to display
+}
+
+// ── QR Code display ──────────────────────────────────────────────────────────
+
+// Pointer to U8G2 context passed to QR callback (espressif/qrcode uses callback pattern)
+static u8g2_t *s_qr_u8g2_ptr = NULL;
+
+// Callback: render QR code pixels to OLED framebuffer via U8G2
+static void qr_display_callback(esp_qrcode_handle_t qrcode)
+{
+    int size = esp_qrcode_get_size(qrcode); // QR module count (e.g., 21 for version 1)
+
+    // Calculate scale factor to fit QR in 64x64 area (OLED is 128x64)
+    int scale = 64 / size;
+    if (scale < 1) scale = 1;
+    int qr_px = size * scale;             // actual rendered size in pixels
+
+    // Center QR on the left 64px of display, leave right side for text
+    int x_offset = (64 - qr_px) / 2;
+    int y_offset = (64 - qr_px) / 2;
+
+    u8g2_ClearBuffer(s_qr_u8g2_ptr);
+
+    // Draw QR modules as filled squares
+    for (int y = 0; y < size; y++) {
+        for (int x = 0; x < size; x++) {
+            if (esp_qrcode_get_module(qrcode, x, y)) {
+                // Draw a scale×scale filled box for each black module
+                u8g2_DrawBox(s_qr_u8g2_ptr, x_offset + x * scale, y_offset + y * scale, scale, scale);
+            }
+        }
+    }
+
+    // Add label text on the right side
+    u8g2_SetFont(s_qr_u8g2_ptr, u8g2_font_5x7_tr);
+    u8g2_DrawStr(s_qr_u8g2_ptr, 68, 12, "Scan with");
+    u8g2_DrawStr(s_qr_u8g2_ptr, 68, 22, "ESP BLE");
+    u8g2_DrawStr(s_qr_u8g2_ptr, 68, 32, "Prov app");
+    u8g2_DrawStr(s_qr_u8g2_ptr, 68, 44, "POP:flipdot");
+    u8g2_DrawStr(s_qr_u8g2_ptr, 68, 58, "C to cancel");
+
+    u8g2_SendBuffer(s_qr_u8g2_ptr);
+}
+
+// Display a QR code on the OLED with label text
+void oled_show_qr(const char *text)
+{
+    s_qr_u8g2_ptr = &s_u8g2; // pass U8G2 context to callback
+
+    esp_qrcode_config_t cfg = {
+        .display_func = qr_display_callback,
+        .max_qrcode_version = 10,
+        .qrcode_ecc_level = ESP_QRCODE_ECC_LOW, // low ECC = fewer modules, larger pixels
+    };
+
+    esp_err_t ret = esp_qrcode_generate(&cfg, text);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "QR generation failed: %s", esp_err_to_name(ret));
+        oled_terminal_print("QR: gen failed");
+    }
 }

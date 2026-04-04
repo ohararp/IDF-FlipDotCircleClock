@@ -1,0 +1,463 @@
+// Network module: WiFi + BLE provisioning + NTP time sync
+// Uses espressif/network_provisioning for BLE-based credential setup
+// and esp_sntp for NTP time synchronization.
+// Ref: https://components.espressif.com/components/espressif/network_provisioning
+
+#include "network.h"
+#include "timekeeping.h"
+#include "oled_display.h"
+#include "esp_log.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "esp_sntp.h"
+#include "esp_timer.h"
+#include "mdns.h"  // espressif/mdns component
+#include "nvs_flash.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/event_groups.h"
+#include "network_provisioning/manager.h"
+#include "network_provisioning/scheme_ble.h"
+#include <string.h>
+
+static const char *TAG = "network";
+
+// Current network state
+static network_state_t s_state = NETWORK_PROVISIONING;
+
+// IP address string buffer
+static char s_ip_str[16] = "N/A";
+
+// NTP sync flag
+static bool s_ntp_synced = false;
+
+// Event group bits for WiFi connection signaling
+#define WIFI_CONNECTED_BIT  BIT0
+#define WIFI_FAIL_BIT       BIT1
+static EventGroupHandle_t s_wifi_event_group;
+
+// Retry counter for WiFi connection
+static int s_retry_count = 0;
+#define MAX_RETRIES 3
+
+// NTP re-sync timer handle
+static esp_timer_handle_t s_ntp_timer = NULL;
+
+// ── Event handlers ───────────────────────────────────────────────────────────
+
+// WiFi + provisioning event handler
+static void event_handler(void *arg, esp_event_base_t event_base,
+                           int32_t event_id, void *event_data)
+{
+    // WiFi STA events
+    if (event_base == WIFI_EVENT) {
+        if (event_id == WIFI_EVENT_STA_START) {
+            esp_wifi_connect();
+        } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+            s_state = NETWORK_DISCONNECTED;
+            ESP_LOGW(TAG, "WiFi disconnected");
+            if (s_retry_count < MAX_RETRIES) {
+                s_retry_count++;
+                ESP_LOGI(TAG, "Retrying WiFi (%d/%d)...", s_retry_count, MAX_RETRIES);
+                esp_wifi_connect();
+            } else {
+                s_state = NETWORK_OFFLINE;
+                ESP_LOGW(TAG, "WiFi offline after %d retries", MAX_RETRIES);
+                xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+            }
+        }
+    }
+
+    // IP events
+    if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        snprintf(s_ip_str, sizeof(s_ip_str), IPSTR, IP2STR(&event->ip_info.ip));
+        ESP_LOGI(TAG, "WiFi connected: %s", s_ip_str);
+        s_state = NETWORK_CONNECTED;
+        s_retry_count = 0;
+        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+
+        // Start mDNS so clock is discoverable as flipclock.local
+        mdns_init();
+        mdns_hostname_set("flipclock");
+        ESP_LOGI(TAG, "mDNS: flipclock.local");
+    }
+
+    // Provisioning events
+    if (event_base == NETWORK_PROV_EVENT) {
+        switch (event_id) {
+        case NETWORK_PROV_START:
+            ESP_LOGI(TAG, "Provisioning started — use ESP BLE Prov app");
+            oled_terminal_print("BLE Prov started");
+            oled_terminal_print("Use ESP BLE Prov app");
+            s_state = NETWORK_PROVISIONING;
+            break;
+        case NETWORK_PROV_WIFI_CRED_RECV: {
+            network_prov_wifi_sta_conn_info_t *info = (network_prov_wifi_sta_conn_info_t *)event_data;
+            ESP_LOGI(TAG, "Prov: received SSID=%s", (const char *)info->ssid);
+            oled_terminal_print("Prov: creds received");
+            break;
+        }
+        case NETWORK_PROV_WIFI_CRED_SUCCESS:
+            ESP_LOGI(TAG, "Prov: credentials applied successfully");
+            oled_terminal_print("Prov: success!");
+            // Only change state if still in provisioning — don't overwrite CONNECTED
+            if (s_state == NETWORK_PROVISIONING) {
+                s_state = NETWORK_CONNECTING;
+            }
+            break;
+        case NETWORK_PROV_WIFI_CRED_FAIL:
+            ESP_LOGW(TAG, "Prov: credentials failed");
+            oled_terminal_print("Prov: failed!");
+            break;
+        case NETWORK_PROV_END:
+            ESP_LOGI(TAG, "Provisioning ended");
+            network_prov_mgr_deinit();
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+// ── NTP ──────────────────────────────────────────────────────────────────────
+
+// NTP sync callback — called when SNTP gets a valid time
+static void ntp_sync_callback(struct timeval *tv)
+{
+    time_t now = tv->tv_sec;
+    ESP_LOGI(TAG, "NTP synced: UTC epoch=%ld", (long)now);
+    oled_terminal_print("NTP synced!");
+
+    // Write UTC to RTC and enable timezone conversion
+    timekeeping_sync_from_ntp(now);
+    timekeeping_mark_ntp_synced();
+    s_ntp_synced = true;
+}
+
+// Start SNTP client
+static void ntp_start(void)
+{
+    ESP_LOGI(TAG, "Starting NTP sync...");
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_set_time_sync_notification_cb(ntp_sync_callback);
+    esp_sntp_init();
+}
+
+// Timer callback: re-sync NTP hourly
+static void ntp_resync_timer_cb(void *arg)
+{
+    if (s_state == NETWORK_CONNECTED) {
+        ESP_LOGI(TAG, "Hourly NTP re-sync");
+        esp_sntp_restart();
+    }
+}
+
+// Start hourly NTP re-sync timer
+static void ntp_start_resync_timer(void)
+{
+    esp_timer_create_args_t timer_args = {
+        .callback = ntp_resync_timer_cb,
+        .name = "ntp_resync",
+    };
+    esp_timer_create(&timer_args, &s_ntp_timer);
+    esp_timer_start_periodic(s_ntp_timer, 3600ULL * 1000000ULL); // 1 hour in µs
+    ESP_LOGI(TAG, "NTP re-sync timer: every 1 hour");
+}
+
+// ── Provisioning ─────────────────────────────────────────────────────────────
+
+// NVS key for "provision on next boot" flag
+#define NVS_KEY_PROV_REQUEST "prov_req"
+
+// Check if provisioning was requested (via Button A long → reboot)
+static bool check_prov_requested(void)
+{
+    nvs_handle_t nvs;
+    uint8_t val = 0;
+    if (nvs_open("flipclock", NVS_READWRITE, &nvs) == ESP_OK) {
+        nvs_get_u8(nvs, NVS_KEY_PROV_REQUEST, &val);
+        if (val == 1) {
+            // Clear the flag so we don't provision again on next reboot
+            nvs_set_u8(nvs, NVS_KEY_PROV_REQUEST, 0);
+            nvs_commit(nvs);
+        }
+        nvs_close(nvs);
+    }
+    return val == 1;
+}
+
+// Set the "provision on next boot" flag in NVS
+static void request_provisioning(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open("flipclock", NVS_READWRITE, &nvs) == ESP_OK) {
+        nvs_set_u8(nvs, NVS_KEY_PROV_REQUEST, 1);
+        nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+}
+
+// Check if WiFi credentials exist by reading NVS directly (avoids init/deinit of prov manager)
+static bool has_wifi_credentials(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open("nvs.net80211", NVS_READONLY, &nvs) != ESP_OK) return false;
+    // The WiFi stack stores SSID in "sta.ssid" key
+    size_t len = 0;
+    esp_err_t ret = nvs_get_blob(nvs, "sta.ssid", NULL, &len);
+    nvs_close(nvs);
+    return (ret == ESP_OK && len > 0);
+}
+
+// Decide boot path: provisioning requested, credentials exist, or skip WiFi
+static esp_err_t decide_boot_path(void)
+{
+    bool prov_requested = check_prov_requested();
+    bool has_creds = has_wifi_credentials();
+
+    if (prov_requested || !has_creds) {
+        if (prov_requested) {
+            ESP_LOGI(TAG, "Provisioning requested via button");
+            // Erase old credentials so prov manager sees "not provisioned"
+            nvs_handle_t nvs;
+            if (nvs_open("nvs.net80211", NVS_READWRITE, &nvs) == ESP_OK) {
+                nvs_erase_all(nvs);
+                nvs_commit(nvs);
+                nvs_close(nvs);
+            }
+        }
+
+        if (!prov_requested && !has_creds) {
+            // No credentials and no request — just skip WiFi, don't start BLE
+            ESP_LOGI(TAG, "No WiFi — hold A to setup");
+            oled_terminal_print("No WiFi config");
+            oled_terminal_print("Hold A to setup");
+            s_state = NETWORK_OFFLINE;
+            return ESP_ERR_NOT_FOUND;
+        }
+
+        // Start BLE provisioning (prov manager handles WiFi init internally)
+        network_start_provisioning();
+        return ESP_OK;
+    }
+
+    // Credentials exist — connect WiFi directly (no prov manager needed)
+    ESP_LOGI(TAG, "WiFi credentials found — connecting");
+    oled_terminal_print("WiFi: connecting...");
+    s_state = NETWORK_CONNECTING;
+    esp_wifi_start();
+    return ESP_OK;
+}
+
+// Start BLE provisioning on-demand (called from Button A long press)
+void network_start_provisioning(void)
+{
+    ESP_LOGI(TAG, "Starting BLE provisioning on-demand");
+
+    // Initialize provisioning manager
+    network_prov_mgr_config_t config = {
+        .scheme = network_prov_scheme_ble,
+        .scheme_event_handler = NETWORK_PROV_SCHEME_BLE_EVENT_HANDLER_FREE_BTDM,
+    };
+    ESP_ERROR_CHECK(network_prov_mgr_init(config));
+
+    // Generate device name with last 3 bytes of MAC for uniqueness
+    uint8_t mac[6];
+    esp_wifi_get_mac(WIFI_IF_STA, mac);
+    char service_name[20];
+    snprintf(service_name, sizeof(service_name), "FlipClk_%02X%02X", mac[4], mac[5]);
+    ESP_LOGI(TAG, "BLE device name: %s", service_name);
+
+    // Start provisioning with Security 1 (proof-of-possession = "flipdot")
+    const char *pop = "flipdot";
+    s_state = NETWORK_PROVISIONING;
+    ESP_ERROR_CHECK(network_prov_mgr_start_provisioning(
+        NETWORK_PROV_SECURITY_1, pop, service_name, NULL));
+
+    // Show provisioning info on OLED terminal + serial
+    char buf[26];
+    snprintf(buf, sizeof(buf), "BLE: %s", service_name);
+    oled_terminal_print(buf);
+    oled_terminal_print("POP: flipdot");
+    oled_terminal_print("Use ESP BLE Prov app");
+    oled_terminal_print("Hold A to reset WiFi");
+
+    // Also print QR payload to serial for reference
+    char qr_payload[128];
+    snprintf(qr_payload, sizeof(qr_payload),
+             "{\"ver\":\"v1\",\"name\":\"%s\",\"pop\":\"%s\",\"transport\":\"ble\"}",
+             service_name, pop);
+    ESP_LOGI(TAG, "QR payload: %s", qr_payload);
+}
+
+// Forward declaration for background task
+static void network_wait_task(void *arg);
+
+// ── Public API ───────────────────────────────────────────────────────────────
+
+// Initialize networking — non-blocking. Three paths: provision, connect, or skip.
+esp_err_t network_init(void)
+{
+    s_wifi_event_group = xEventGroupCreate();
+
+    // Initialize TCP/IP stack and event loop
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    // Register event handlers
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL));
+
+    // Initialize WiFi driver
+    wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&wifi_cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+
+    // Init prov manager to check credential state (kept alive — not deinit'd)
+    network_prov_mgr_config_t prov_config = {
+        .scheme = network_prov_scheme_ble,
+        .scheme_event_handler = NETWORK_PROV_SCHEME_BLE_EVENT_HANDLER_FREE_BTDM,
+    };
+    ESP_ERROR_CHECK(network_prov_mgr_init(prov_config));
+
+    // Check if Button A requested provisioning on this boot
+    bool prov_requested = check_prov_requested();
+    if (prov_requested) {
+        ESP_LOGI(TAG, "Provisioning requested — erasing old credentials");
+        network_prov_mgr_reset_wifi_provisioning();
+    }
+
+    // Check if credentials exist
+    bool provisioned = false;
+    ESP_ERROR_CHECK(network_prov_mgr_is_wifi_provisioned(&provisioned));
+
+    if (prov_requested || !provisioned) {
+        if (!prov_requested) {
+            // No credentials and not requested — skip WiFi entirely
+            ESP_LOGI(TAG, "No WiFi — hold A to setup");
+            oled_terminal_print("No WiFi config");
+            oled_terminal_print("Hold A to setup");
+            network_prov_mgr_deinit(); // release BLE memory since we won't provision
+            s_state = NETWORK_OFFLINE;
+        } else {
+            // Provisioning requested — start BLE prov (prov manager already init'd)
+            ESP_LOGI(TAG, "Starting BLE provisioning");
+            uint8_t mac[6];
+            esp_wifi_get_mac(WIFI_IF_STA, mac);
+            char service_name[20];
+            snprintf(service_name, sizeof(service_name), "FlipClk_%02X%02X", mac[4], mac[5]);
+
+            const char *pop = "flipdot";
+            s_state = NETWORK_PROVISIONING;
+            ESP_ERROR_CHECK(network_prov_mgr_start_provisioning(
+                NETWORK_PROV_SECURITY_1, pop, service_name, NULL));
+
+            // Show QR code on OLED for scanning
+            char qr_payload[128];
+            snprintf(qr_payload, sizeof(qr_payload),
+                     "{\"ver\":\"v1\",\"name\":\"%s\",\"pop\":\"%s\",\"transport\":\"ble\"}",
+                     service_name, pop);
+            ESP_LOGI(TAG, "QR payload: %s", qr_payload);
+            oled_show_qr(qr_payload);
+
+            ESP_LOGI(TAG, "BLE device: %s, POP: %s", service_name, pop);
+        }
+    } else {
+        // Credentials exist — connect directly
+        ESP_LOGI(TAG, "WiFi credentials found — connecting");
+        oled_terminal_print("WiFi: connecting...");
+        s_state = NETWORK_CONNECTING;
+        network_prov_mgr_deinit(); // don't need prov manager for direct connect
+        esp_wifi_start();
+        xTaskCreate(network_wait_task, "net_wait", 4096, NULL, 3, NULL);
+    }
+
+    return ESP_OK;
+}
+
+// Background task: wait for WiFi, then start NTP
+static void network_wait_task(void *arg)
+{
+    // Wait for WiFi connection (or failure)
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
+
+    if (bits & WIFI_CONNECTED_BIT) {
+        ntp_start();
+        ntp_start_resync_timer();
+    } else {
+        ESP_LOGW(TAG, "WiFi failed — clock runs on RTC only");
+        oled_terminal_print("WiFi: offline");
+    }
+
+    vTaskDelete(NULL); // self-delete
+}
+
+// Manual reconnect (Button A long)
+void network_recover(void)
+{
+    ESP_LOGI(TAG, "Manual WiFi reconnect");
+    oled_terminal_print("WiFi: reconnecting...");
+    s_retry_count = 0;
+    s_state = NETWORK_CONNECTING;
+    esp_wifi_connect();
+}
+
+// Stop active BLE provisioning and free resources
+void network_stop_provisioning(void)
+{
+    ESP_LOGI(TAG, "Stopping BLE provisioning");
+    network_prov_mgr_stop_provisioning();
+    network_prov_mgr_deinit();
+    if (s_state == NETWORK_PROVISIONING) {
+        s_state = NETWORK_OFFLINE;
+    }
+}
+
+// Request provisioning on next boot (sets NVS flag) and reboot
+void network_reset_provisioning(void)
+{
+    ESP_LOGW(TAG, "Requesting WiFi provisioning on next boot");
+    request_provisioning();
+    esp_restart();
+}
+
+// Get current network state
+network_state_t network_get_state(void)
+{
+    return s_state;
+}
+
+// Get IP address string
+const char *network_get_ip_str(void)
+{
+    return s_ip_str;
+}
+
+// Get WiFi RSSI
+int network_get_rssi(void)
+{
+    if (s_state != NETWORK_CONNECTED) return 0;
+    wifi_ap_record_t ap_info;
+    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+        return ap_info.rssi;
+    }
+    return 0;
+}
+
+// Check if NTP has synced
+bool network_ntp_synced(void)
+{
+    return s_ntp_synced;
+}
+
+// Check if provisioning is active
+bool network_is_provisioning(void)
+{
+    return s_state == NETWORK_PROVISIONING;
+}

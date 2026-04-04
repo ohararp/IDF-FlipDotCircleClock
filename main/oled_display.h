@@ -20,3 +20,6 @@ void oled_clear(void);
 
 // Print a line to the OLED scrolling terminal (8 lines × ~25 chars, 5x7 font)
 void oled_terminal_print(const char *line);
+
+// Display a QR code on the OLED (centered, scaled to fit 64x64 area)
+void oled_show_qr(const char *text);

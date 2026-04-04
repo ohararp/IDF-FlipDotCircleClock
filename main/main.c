@@ -18,6 +18,7 @@
 #include "animations.h"
 #include "gpio_config.h"
 #include "timekeeping.h"
+#include "network.h"
 
 static const char *TAG = "main";
 
@@ -33,24 +34,38 @@ static SemaphoreHandle_t s_hw_mutex = NULL;
 // Track current displayed hour so +1 hour can wrap correctly
 static int s_current_hour_12 = 0;
 
+// Track if buttons were initialized (may be init'd early for provisioning cancel)
+static bool s_buttons_inited = false;
+
 // Startup trackers — set by setup() so main loop doesn't duplicate the first update
 static int s_startup_hr = -1;
 static int s_startup_min = -1;
 
 // ── Background tasks ─────────────────────────────────────────────────────────
 
-// Task: toggle NeoPixel purple/off at 500 ms — visual heartbeat during startup
-static void neopixel_blink_task(void *arg)
+// Task: NeoPixel reflects network state — all colors blink 1Hz (on 500ms / off 500ms)
+static void neopixel_status_task(void *arg)
 {
     bool led_on = false;
     while (1) {
         if (led_on) {
-            neopixel_set_color(32, 0, 32); // purple = WiFi connecting status color
+            // ON phase: show status color
+            network_state_t state = network_get_state();
+            if (state == NETWORK_CONNECTED && network_ntp_synced()) {
+                neopixel_set_color(0, 32, 0);    // green: WiFi + NTP synced
+            } else if (state == NETWORK_CONNECTED) {
+                neopixel_set_color(0, 32, 32);   // cyan: WiFi OK, NTP pending
+            } else if (state == NETWORK_OFFLINE || state == NETWORK_DISCONNECTED) {
+                neopixel_set_color(32, 16, 0);   // yellow: WiFi failed
+            } else {
+                neopixel_set_color(32, 0, 32);   // purple: provisioning/connecting
+            }
         } else {
+            // OFF phase: all colors blink off for heartbeat effect
             neopixel_off();
         }
         led_on = !led_on;
-        vTaskDelay(pdMS_TO_TICKS(500)); // 1 Hz blink rate
+        vTaskDelay(pdMS_TO_TICKS(500)); // 500ms on / 500ms off = 1Hz blink
     }
 }
 
@@ -94,9 +109,9 @@ static void setup(void)
     ESP_ERROR_CHECK(nvm_init());
     ESP_ERROR_CHECK(timekeeping_init());
 
-    // 2. NeoPixel status LED — blink purple during setup
+    // 2. NeoPixel status LED — reflects network state (purple/green/yellow/cyan)
     ESP_ERROR_CHECK(neopixel_init());
-    xTaskCreate(neopixel_blink_task, "neopixel", 2048, NULL, 2, NULL);
+    xTaskCreate(neopixel_status_task, "neopixel", 2048, NULL, 2, NULL);
 
     // 3. I2C bus + peripherals (RTC, OLED, AS5600 all share one bus)
     i2c_master_bus_handle_t i2c_bus = NULL;
@@ -137,7 +152,34 @@ static void setup(void)
         ESP_LOGW(TAG, "I2C bus failed — no RTC, OLED, or AS5600");
     }
 
-    // 4. Flip-dot display (SPI bit-bang + 24V relay)
+    // 4. WiFi (non-blocking — connects in background if credentials stored, skips if not)
+    network_init();
+
+    // If BLE provisioning is active, hold here with QR on OLED until done or C to skip
+    if (network_is_provisioning()) {
+        ESP_LOGI(TAG, "BLE provisioning active — press C to skip");
+        // Init buttons early so C press works during provisioning
+        if (!s_buttons_inited) { ESP_ERROR_CHECK(buttons_init()); s_buttons_inited = true; }
+        app_button_event_t prov_evt;
+        while (network_is_provisioning()) {
+            if (!network_is_provisioning()) {
+                ESP_LOGI(TAG, "Provisioning complete — rebooting to apply");
+                oled_terminal_print("Rebooting...");
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                esp_restart();
+            }
+            if (buttons_get_event(&prov_evt, 500)) {
+                if (prov_evt == BUTTON_EVENT_C_SHORT) {
+                    ESP_LOGI(TAG, "Provisioning skipped by Button C");
+                    oled_terminal_print("WiFi: skipped");
+                    network_stop_provisioning();
+                    break;
+                }
+            }
+        }
+    }
+
+    // 5. Flip-dot display (SPI bit-bang + 24V relay)
     ESP_ERROR_CHECK(flipdot_init());
 
     // 5. Stepper motor init
@@ -177,7 +219,7 @@ static void setup(void)
     s_hw_mutex = xSemaphoreCreateMutex();
 
     // 8. Buttons A (GPIO 1), B (GPIO 38), C (GPIO 33) with short/long press detection
-    ESP_ERROR_CHECK(buttons_init());
+    if (!s_buttons_inited) { ESP_ERROR_CHECK(buttons_init()); s_buttons_inited = true; }
 
     // 9. Background display task (1 s OLED + serial refresh)
     xTaskCreate(display_task, "display", 4096, NULL, 3, &s_display_task);
@@ -249,10 +291,13 @@ void app_main(void)
                     break;
 
                 case BUTTON_EVENT_A_LONG:
-                    // Placeholder — reserved for future use
-                    ESP_LOGI(TAG, "Btn A long — unassigned");
-                    oled_terminal_print("A long: unassigned");
+                    // Request WiFi provisioning — sets NVS flag and reboots
+                    // On reboot, BLE prov starts cleanly before WiFi stack init
+                    ESP_LOGI(TAG, "Btn A long — request WiFi provisioning");
+                    oled_terminal_print("WiFi setup...");
+                    oled_terminal_print("Rebooting...");
                     vTaskDelay(pdMS_TO_TICKS(1000));
+                    network_reset_provisioning(); // sets flag, reboots
                     break;
 
                 case BUTTON_EVENT_B_SHORT:

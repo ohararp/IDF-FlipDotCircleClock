@@ -154,23 +154,36 @@ esp_err_t timekeeping_init(void)
     return ESP_OK;
 }
 
+// Track whether NTP has synced — only apply timezone offset after NTP writes UTC to RTC
+static bool s_ntp_has_synced = false;
+
+// Called by network.c after NTP sync to enable timezone conversion
+void timekeeping_mark_ntp_synced(void)
+{
+    s_ntp_has_synced = true;
+}
+
 // Read local time from RTC.
-// Pre-NTP: RTC stores local time directly (seeded from compile timestamp).
-// Post-NTP (Step 12): RTC will store UTC and this function will apply timezone + DST.
+// Before NTP: RTC contains local time (compile timestamp) — read directly.
+// After NTP: RTC contains UTC — apply timezone + DST offset.
 esp_err_t timekeeping_get_local_time(struct tm *local)
 {
-    // For now, RTC contains local time — read it directly
-    return ds3231_get_time(local);
+    esp_err_t ret = ds3231_get_time(local);
+    if (ret != ESP_OK) return ret;
 
-    // TODO (Step 12): When NTP is added, RTC will store UTC. Uncomment this:
-    // const timezone_def_t *tz = &s_timezones[s_tz_index];
-    // int dst_min = calculate_dst_offset(tz, local);
-    // int total_offset_sec = (tz->utc_offset_min + dst_min) * 60;
-    // time_t epoch = mktime(local);
-    // epoch += total_offset_sec;
-    // struct tm *result = localtime(&epoch);
-    // *local = *result;
-    // return ESP_OK;
+    // Only apply timezone offset if NTP has synced (RTC contains UTC)
+    if (s_ntp_has_synced) {
+        const timezone_def_t *tz = &s_timezones[s_tz_index];
+        int dst_min = calculate_dst_offset(tz, local);
+        int total_offset_sec = (tz->utc_offset_min + dst_min) * 60;
+
+        time_t epoch = mktime(local);
+        epoch += total_offset_sec;
+        struct tm *result = localtime(&epoch);
+        *local = *result;
+    }
+
+    return ESP_OK;
 }
 
 // Set active timezone by index, save to NVS

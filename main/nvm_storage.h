@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 // Default configuration values matching CircuitPython defaults
-#define NVM_DEFAULT_TIMEZONE_INDEX  0     // US/Eastern
+#define NVM_DEFAULT_TIMEZONE_INDEX  6     // US/Eastern (index 6 in timekeeping.c timezone array)
 #define NVM_DEFAULT_HOME_OFFSET     0     // no offset from Hall sensor home
 #define NVM_DEFAULT_STEP_DELAY_US   450   // 450 µs step pulse delay
 #define NVM_DEFAULT_AS5600_CAL      0     // uncalibrated

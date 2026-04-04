@@ -8,6 +8,16 @@ dependencies:
   # https://components.espressif.com/components/espressif/pid_ctrl
   # Used for closed-loop stepper positioning with AS5600 encoder feedback
   espressif/pid_ctrl: "^0.2.0"
+  # espressif/network_provisioning: WiFi provisioning via BLE or SoftAP
+  # https://components.espressif.com/components/espressif/network_provisioning
+  # Replaces wifi_provisioning which was removed from ESP-IDF 6.0 core
+  espressif/network_provisioning: "^1.2.2"
+  # espressif/mdns: mDNS hostname resolution (flipclock.local)
+  # Moved from ESP-IDF core to external component in v6.0
+  espressif/mdns: "^1.4.0"
+  # espressif/qrcode: QR code generation for OLED provisioning display
+  # https://components.espressif.com/components/espressif/qrcode
+  espressif/qrcode: "^0.2.0"
   u8g2:
     git: "https://github.com/olikraus/u8g2.git"
     version: "a549a13b13b5fd568111557c1dd7ca3d06fbe21a"

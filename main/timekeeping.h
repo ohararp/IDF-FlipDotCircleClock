@@ -39,8 +39,11 @@ esp_err_t timekeeping_set_timezone(uint8_t tz_index);
 // Get current timezone index
 uint8_t timekeeping_get_timezone_index(void);
 
-// Stub for NTP sync — updates RTC with UTC time, applies timezone/DST (used in Step 12)
+// Write UTC epoch from NTP to RTC and enable timezone conversion
 esp_err_t timekeeping_sync_from_ntp(time_t utc_epoch);
+
+// Mark that NTP has synced — enables timezone/DST conversion in get_local_time()
+void timekeeping_mark_ntp_synced(void);
 
 // Move stepper to current minute position (AS5600 closed-loop or open-loop fallback)
 void clock_update_minute(const struct tm *local);

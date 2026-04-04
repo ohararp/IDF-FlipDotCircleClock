@@ -15,6 +15,7 @@
 #include "calibration.h"
 #include "buttons.h"
 #include "flipdot.h"
+#include "animations.h"
 #include "gpio_config.h"
 #include "timekeeping.h"
 
@@ -239,38 +240,22 @@ void app_main(void)
                 switch (event) {
 
                 case BUTTON_EVENT_A_SHORT:
-                    // Home minute hand to 12 o'clock and stay there for debugging
-                    ESP_LOGI(TAG, "Btn A short — home and hold");
-                    stepper_find_home();
+                    // Sync animation: synchronized hand + flipdot sweep through all 12 hours
+                    ESP_LOGI(TAG, "Btn A short — sync animation");
+                    anim_sync();
+                    timekeeping_get_local_time(&local);
+                    min_old = local.tm_min;
+                    hr_old = local.tm_hour;
                     break;
 
-                case BUTTON_EVENT_A_LONG: {
-                    // AS5600 mapping test: step to 12, 15, 30, 45, 60 min positions
-                    // At each position, wait for user to confirm hand placement, read AS5600
-                    // AS5600 live debug: motor off, print angle every 500ms, press C to exit
-                    ESP_LOGI(TAG, "Btn A long — AS5600 live debug");
-                    oled_terminal_print("AS5600 LIVE DEBUG");
-                    oled_terminal_print("Turn hand by hand");
-                    oled_terminal_print("Press C to exit");
-                    stepper_disable();
-
-                    app_button_event_t dbg_evt;
-                    while (1) {
-                        // Dump all registers to serial, show raw angle on OLED
-                        as5600_debug_dump();
-                        uint16_t angle = 0;
-                        as5600_read_raw_angle(&angle);
-                        char buf[26];
-                        snprintf(buf, sizeof(buf), "raw=%d  %.1fdeg", angle, as5600_to_degrees(angle));
-                        oled_terminal_print(buf);
-                        if (buttons_get_event(&dbg_evt, 500)) {
-                            if (dbg_evt == BUTTON_EVENT_C_SHORT) break;
-                        }
-                    }
-                    stepper_enable();
-                    oled_terminal_print("Debug exited");
+                case BUTTON_EVENT_A_LONG:
+                    // Chaos animation: random hour positions with motor + flipdot
+                    ESP_LOGI(TAG, "Btn A long — chaos animation");
+                    anim_chaos();
+                    timekeeping_get_local_time(&local);
+                    min_old = local.tm_min;
+                    hr_old = local.tm_hour;
                     break;
-                }
 
                 case BUTTON_EVENT_B_SHORT:
                     // +1 hour: read RTC, add 1 hour, write back, update flipdot display
@@ -290,10 +275,12 @@ void app_main(void)
                     break;
 
                 case BUTTON_EVENT_B_LONG:
-                    // Sync animation placeholder (Step 10) — for now just test all hours
-                    ESP_LOGI(TAG, "Btn B long — sync anim (placeholder)");
-                    oled_terminal_print("Anim: not yet impl");
-                    vTaskDelay(pdMS_TO_TICKS(2000));
+                    // Sync animation: synchronized hand + flipdot sweep through all 12 hours
+                    ESP_LOGI(TAG, "Btn B long — sync animation");
+                    anim_sync();
+                    timekeeping_get_local_time(&local);
+                    min_old = local.tm_min;
+                    hr_old = local.tm_hour;
                     break;
 
                 case BUTTON_EVENT_C_SHORT:

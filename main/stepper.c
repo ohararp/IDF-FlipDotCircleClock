@@ -186,84 +186,87 @@ bool stepper_move_to_angle(uint16_t target_raw, int tolerance)
 
     stepper_enable();
 
-    // Create PID controller — positional mode, tuned for stepper + AS5600
-    // AS5600 ratio: ~3.12 motor steps per AS5600 unit (12800 steps / 4096 units)
-    pid_ctrl_parameter_t pid_params = {
-        .kp = 0.5f,              // 0.5 steps per AS5600 unit of error (~1.6 steps/degree)
-        .ki = 0.0f,              // no integral — stepper has no steady-state error
-        .kd = 0.1f,              // derivative dampens oscillation near target
-        .max_output = 200.0f,    // max 200 steps per iteration
-        .min_output = -200.0f,   // allow both CW and CCW
-        .max_integral = 0.0f,    // no integral accumulation
-        .min_integral = 0.0f,
-        .cal_type = PID_CAL_TYPE_POSITIONAL,
-    };
-    pid_ctrl_config_t pid_cfg = { .init_param = pid_params };
-    pid_ctrl_block_handle_t pid = NULL;
+    stepper_enable();
 
-    esp_err_t ret = pid_new_control_block(&pid_cfg, &pid);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "PID init failed: %s", esp_err_to_name(ret));
-        return false;
-    }
-
-    // Read initial position for logging
+    // Read initial position
     uint16_t current;
     as5600_read_raw_angle(&current);
     ESP_LOGI(TAG, "PID move: cur=%d tgt=%d tol=%d", current, target_raw, tolerance);
 
-    const int max_iterations = 200; // 200 × 20ms = 4s max convergence time
+    // AS5600-to-step ratio: ~3.12 steps per AS5600 unit (12800 / 4096)
+    const float STEPS_PER_UNIT = (float)STEPPER_STEPS_PER_REV / 4096.0f;
+
+    // Save original step delay so we can restore it after
+    uint16_t original_delay = s_step_delay_us;
+
+    const int max_iterations = 100;
     bool converged = false;
 
     for (int iter = 0; iter < max_iterations; iter++) {
-        // Read current AS5600 angle
         if (as5600_read_raw_angle(&current) != ESP_OK) break;
 
-        // Calculate CW-only distance to target (always positive, wraps around 4096)
-        float error = (float)((target_raw - current + 4096) % 4096);
+        // CW-only distance to target (always positive, wraps around 4096)
+        int cw_dist = (target_raw - current + 4096) % 4096;
 
         // Check if within tolerance — target reached
-        if (error <= (float)tolerance || error >= (4096.0f - (float)tolerance)) {
+        if (cw_dist <= tolerance || cw_dist >= (4096 - tolerance)) {
             s_step_now = as5600_to_steps(current);
-            ESP_LOGI(TAG, "PID converged: cur=%d err=%.0f iter=%d", current, error, iter);
+            ESP_LOGI(TAG, "PID converged: cur=%d err=%d iter=%d", current, cw_dist, iter);
             converged = true;
             break;
         }
 
-        // Compute PID output (always positive since error is always positive CW distance)
-        float output = 0;
-        pid_compute(pid, error, &output);
+        // Non-linear approach: step count, motor speed, and settle time scale with distance
+        int steps;
+        int settle_ms;
 
-        // Always step CW — take abs(output) steps
-        int steps = (int)fabsf(output);
-        if (steps == 0) {
-            s_step_now = as5600_to_steps(current);
-            ESP_LOGI(TAG, "PID converged (deadband): cur=%d err=%.0f iter=%d", current, error, iter);
-            converged = true;
-            break;
+        if (cw_dist > 1000) {
+            // Very far (>88°): 80% of distance, fast motor, short settle
+            steps = (int)(cw_dist * STEPS_PER_UNIT * 0.8f);
+            s_step_delay_us = 200;   // fast — 200µs per step
+            settle_ms = 30;
+        } else if (cw_dist > 200) {
+            // Far (>18°): 60% of distance, medium speed
+            steps = (int)(cw_dist * STEPS_PER_UNIT * 0.6f);
+            s_step_delay_us = 350;   // medium — 350µs per step
+            settle_ms = 40;
+        } else if (cw_dist > 50) {
+            // Close (>4.4°): 40% of distance, slower for precision
+            steps = (int)(cw_dist * STEPS_PER_UNIT * 0.4f);
+            s_step_delay_us = 500;   // slow — 500µs per step
+            settle_ms = 50;
+        } else {
+            // Very close (<4.4°): proportional steps at slow speed for precision
+            steps = (int)(cw_dist * STEPS_PER_UNIT * 0.5f);
+            if (steps < 1) steps = 1;
+            s_step_delay_us = 600;   // very slow — 600µs per step
+            settle_ms = 40;
         }
+
+        if (steps < 1) steps = 1;
 
         // Execute steps — CW only
         for (int s = 0; s < steps; s++) {
             one_step(true);
         }
 
-        // Settle delay: let motor physically move and AS5600 output stabilize
-        vTaskDelay(pdMS_TO_TICKS(50)); // 50ms between PID iterations for reliable AS5600 reads
+        // Variable settle delay for AS5600 to stabilize
+        vTaskDelay(pdMS_TO_TICKS(settle_ms));
 
-        // Log every 10th iteration for tuning visibility
-        if (iter % 10 == 0) {
-            ESP_LOGI(TAG, "PID[%d]: cur=%d err=%.0f out=%.1f steps=%d CW",
-                     iter, current, error, output, steps);
+        // Log every 5th iteration
+        if (iter % 5 == 0) {
+            ESP_LOGI(TAG, "PID[%d]: cur=%d err=%d steps=%d delay=%dus",
+                     iter, current, cw_dist, steps, s_step_delay_us);
         }
     }
 
+    // Restore original step delay
+    s_step_delay_us = original_delay;
+
     if (!converged) {
         as5600_read_raw_angle(&current);
-        ESP_LOGW(TAG, "PID failed: cur=%d tgt=%d after %d iterations", current, target_raw, max_iterations);
+        ESP_LOGW(TAG, "PID failed: cur=%d tgt=%d after %d iters", current, target_raw, max_iterations);
     }
 
-    // Clean up PID controller
-    pid_del_control_block(pid);
     return converged;
 }

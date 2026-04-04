@@ -265,25 +265,23 @@ FlipDotCircleClock/
 
 ---
 
-## Step 10: Animations
+## Step 10: Animations ✅
 
-**Goal:** Port the three animation sequences, triggered by buttons.
+**Implemented:**
+- `animations.c/.h` — sync animation only (demo and chaos removed):
+  - `anim_sync()` — home → blank flipdots → sweep hand to each hour (1–12) using PID `stepper_move_to_angle()` with matching flipdot display (1s per hour) → restore current time
+  - Blocking — runs on caller's task with `vTaskDelay()`
+  - Display task suspended + hardware mutex acquired by caller in main.c
+  - `restore_time()` helper: homes motor, sets flipdot hour, moves minute hand to current time
+- Button A short triggers `anim_sync()`
+- Button A long and B long: placeholder (unassigned, print message)
+- **Motor control improvements (also in this step):**
+  - `multi_step_ramped()`: trapezoidal speed profile (accel 20% → cruise 60% → decel 20%) with linear delay interpolation
+  - `stepper_move_to_angle()`: non-linear proportional control with ramped stepping. Far=600→150→400µs, medium=500→250→400µs, close=500→350→500µs
+  - PID tolerance tightened to ±1 AS5600 unit (±0.09°)
+  - `stepper_find_home()`: PID-only (no open-loop pre-move that caused overshoot)
 
-**Implement:**
-- `animations.c/.h`:
-  - `anim_demo()` — go home, sweep hours 1–12 on flipdots (1.5s each), restore current time
-  - `anim_chaos()` — random hour positions with motor + flipdot (12 iterations, 1.5s each), restore
-  - `anim_sync()` — synchronized hand sweep to each hour (STEPS/12 per hour, 1.5s each), restore
-  - All animations are blocking (run on caller's task with `vTaskDelay()`)
-  - Suspend display task during animation to prevent OLED conflicts
-  - Acquire motor/flipdot mutex before running
-- Button triggers:
-  - Button A short: `anim_demo()` (or re-home — TBD based on testing)
-  - Button B long: `anim_sync()`
-
-**ESP-IDF APIs:** `esp_random()` for chaos mode, `vTaskDelay()`
-
-**Verify:** Trigger each animation from button press. Motor and flip-dots operate in sync. Animations complete without watchdog timeouts. Clock restores correct time after animation.
+**ESP-IDF APIs:** `vTaskDelay()`
 
 ---
 

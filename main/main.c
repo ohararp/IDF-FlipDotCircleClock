@@ -176,8 +176,8 @@ void app_main(void)
         // Service flipdot relay hold window — turns off relay when hold period expires
         flipdot_service_power_window();
 
-        // Read local time for scheduling checks
-        if (timekeeping_get_local_time(&local) == ESP_OK) {
+        // Read local time for scheduling checks — skip all clock updates during calibration
+        if (!calibration_is_active() && timekeeping_get_local_time(&local) == ESP_OK) {
             // Minute boundary crossed → move minute hand (with mutex)
             if (local.tm_min != min_old) {
                 if (xSemaphoreTake(s_hw_mutex, pdMS_TO_TICKS(500))) {
@@ -216,17 +216,12 @@ void app_main(void)
                 switch (event) {
 
                 case BUTTON_EVENT_A_SHORT:
-                    // Re-home: blank display → home motor → restore hour + minute
-                    ESP_LOGI(TAG, "Btn A short — re-home sequence");
-                    flipdot_power_on();
-                    flipdot_blank();
-                    vTaskDelay(pdMS_TO_TICKS(500));
-                    flipdot_power_off();
+                    // Home minute hand to 12 o'clock, hold 5s, then restore to current minute
+                    ESP_LOGI(TAG, "Btn A short — home → hold 5s → restore");
                     stepper_find_home();
+                    vTaskDelay(pdMS_TO_TICKS(5000)); // hold at 12 o'clock for 5 seconds
                     timekeeping_get_local_time(&local);
-                    clock_update_hour(&local);
                     clock_update_minute(&local);
-                    vTaskDelay(pdMS_TO_TICKS(2000));
                     min_old = local.tm_min;
                     hr_old = local.tm_hour;
                     break;

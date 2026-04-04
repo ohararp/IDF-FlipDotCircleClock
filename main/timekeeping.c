@@ -198,43 +198,22 @@ esp_err_t timekeeping_sync_from_ntp(time_t utc_epoch)
 
 // ── Clock update functions ───────────────────────────────────────────────────
 
-// Move stepper to the current minute position (0–59 → 0–12799 steps)
+// Move stepper to the current minute position (0–59 → 0–12799 steps, open-loop CW only)
 void clock_update_minute(const struct tm *local)
 {
     int minute = local->tm_min;
     int target_steps = (minute * STEPPER_STEPS_PER_REV) / 60;
 
-    if (as5600_is_connected()) {
-        // Closed-loop: use AS5600 calibration for precise absolute positioning
-        uint16_t home_offset = calibration_get_offset();
-        uint16_t target_raw = as5600_minute_to_raw(minute, home_offset);
-
-        // First: if at home (minute 0), align to calibrated 12 o'clock via AS5600
-        if (minute == 0 && home_offset != 0) {
-            stepper_move_to_angle(home_offset, 15); // move to calibrated 12:00
-            stepper_set_position(0);
-            ESP_LOGI(TAG, "Aligned to calibrated 12:00 (AS5600 raw=%d)", home_offset);
-            return;
-        }
-
-        // Bulk CW move first (open-loop estimate), then fine-tune with AS5600 feedback
-        int current_pos = stepper_get_position();
-        int steps_needed = (target_steps - current_pos + STEPPER_STEPS_PER_REV) % STEPPER_STEPS_PER_REV;
-        if (steps_needed > 0) {
-            stepper_multi_step(steps_needed, true); // CW only
-        }
-        stepper_move_to_angle(target_raw, 15); // fine-tune within ±15 AS5600 units
-    } else {
-        // Open-loop fallback: pure step counting, CW only
-        int current_pos = stepper_get_position();
-        int steps_needed = (target_steps - current_pos + STEPPER_STEPS_PER_REV) % STEPPER_STEPS_PER_REV;
-        if (steps_needed > 0) {
-            stepper_multi_step(steps_needed, true); // CW only
-        }
-        stepper_set_position(target_steps);
+    // Open-loop step counting: calculate CW steps needed from current position
+    int current_pos = stepper_get_position();
+    int steps_needed = (target_steps - current_pos + STEPPER_STEPS_PER_REV) % STEPPER_STEPS_PER_REV;
+    if (steps_needed > 0) {
+        stepper_multi_step(steps_needed, true); // CW only
     }
+    stepper_set_position(target_steps);
 
-    ESP_LOGI(TAG, "Minute update: %02d → step %d", minute, target_steps);
+    ESP_LOGI(TAG, "Minute update: %02d → step %d (from %d, moved %d)",
+             minute, target_steps, current_pos, steps_needed);
 }
 
 // Update flip-dot display with current hour (12-hour format)

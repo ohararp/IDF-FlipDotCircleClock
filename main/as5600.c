@@ -10,9 +10,13 @@ static i2c_master_dev_handle_t s_as5600_dev;
 // Track whether AS5600 was successfully detected during init
 static bool s_connected = false;
 
-// AS5600 register addresses for raw angle (12-bit, read-only)
-#define REG_RAW_ANGLE_H 0x0C // bits 11:8 in lower nibble
-#define REG_RAW_ANGLE_L 0x0D // bits 7:0
+// AS5600 register addresses
+#define REG_RAW_ANGLE_H 0x0C // raw angle bits 11:8 in lower nibble
+#define REG_RAW_ANGLE_L 0x0D // raw angle bits 7:0
+#define REG_STATUS      0x0B // status: bit5=magnet detected, bit4=too weak, bit3=too strong
+#define REG_AGC         0x1A // automatic gain control (0-255, lower=stronger magnet)
+#define REG_MAGNITUDE_H 0x1B // magnet magnitude high byte
+#define REG_MAGNITUDE_L 0x1C // magnet magnitude low byte
 
 // Attach AS5600 at 0x36 to the shared I2C bus and verify communication
 esp_err_t as5600_init(i2c_master_bus_handle_t bus_handle)
@@ -41,8 +45,36 @@ esp_err_t as5600_init(i2c_master_bus_handle_t bus_handle)
     }
 
     s_connected = true;
-    ESP_LOGI(TAG, "AS5600 initialized at 0x%02X (raw angle: %d, %.1f deg)",
-             AS5600_I2C_ADDR, angle, as5600_to_degrees(angle));
+
+    // Read diagnostic registers: status, AGC, magnitude
+    uint8_t status_reg = REG_STATUS;
+    uint8_t status;
+    i2c_master_transmit_receive(s_as5600_dev, &status_reg, 1, &status, 1, 100);
+
+    uint8_t agc_reg = REG_AGC;
+    uint8_t agc;
+    i2c_master_transmit_receive(s_as5600_dev, &agc_reg, 1, &agc, 1, 100);
+
+    uint8_t mag_reg = REG_MAGNITUDE_H;
+    uint8_t mag_data[2];
+    i2c_master_transmit_receive(s_as5600_dev, &mag_reg, 1, mag_data, 2, 100);
+    uint16_t magnitude = ((uint16_t)(mag_data[0] & 0x0F) << 8) | mag_data[1];
+
+    bool magnet_detected = (status >> 5) & 1; // MD bit
+    bool too_weak        = (status >> 4) & 1; // ML bit (magnet too far)
+    bool too_strong      = (status >> 3) & 1; // MH bit (magnet too close)
+
+    ESP_LOGI(TAG, "AS5600 at 0x%02X: angle=%d (%.1f deg), AGC=%d, mag=%d",
+             AS5600_I2C_ADDR, angle, as5600_to_degrees(angle), agc, magnitude);
+    ESP_LOGI(TAG, "AS5600 status: magnet=%s %s%s",
+             magnet_detected ? "YES" : "NO",
+             too_weak ? "TOO_WEAK " : "",
+             too_strong ? "TOO_STRONG" : "");
+
+    if (!magnet_detected) {
+        ESP_LOGW(TAG, "AS5600: no magnet detected — closed-loop will not work!");
+    }
+
     return ESP_OK;
 }
 

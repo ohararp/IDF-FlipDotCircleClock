@@ -139,45 +139,22 @@ void stepper_set_position(int position)
     s_step_now = position % STEPPER_STEPS_PER_REV;
 }
 
-// Home to 12 o'clock using AS5600 calibration offset — no Hall sensor needed
+// Home to 12 o'clock using open-loop step counting (CW to step position 0)
 esp_err_t stepper_find_home(void)
 {
     home_log("Home: starting...");
     stepper_enable();
 
-    if (!as5600_is_connected()) {
-        home_log("Home: no AS5600!");
-        home_log("Home: calibrate first");
-        return ESP_ERR_NOT_FOUND;
+    // Calculate CW steps needed to reach position 0 (12 o'clock)
+    int steps_to_home = (STEPPER_STEPS_PER_REV - s_step_now) % STEPPER_STEPS_PER_REV;
+    home_log("Home: pos=%d moving %d CW", s_step_now, steps_to_home);
+
+    if (steps_to_home > 0) {
+        stepper_multi_step(steps_to_home, true); // CW to 12 o'clock
     }
 
-    // Load calibrated 12 o'clock angle from NVS
-    uint16_t home_angle = calibration_get_offset();
-    if (home_angle == 0) {
-        home_log("Home: not calibrated!");
-        home_log("Home: hold C to cal");
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    // Read current AS5600 position
-    uint16_t current;
-    esp_err_t ret = as5600_read_raw_angle(&current);
-    if (ret != ESP_OK) {
-        home_log("Home: AS5600 read err");
-        return ret;
-    }
-
-    home_log("Home: cur=%d tgt=%d", current, home_angle);
-
-    // Move to calibrated 12 o'clock using closed-loop AS5600 feedback
-    if (stepper_move_to_angle(home_angle, 15)) {
-        s_step_now = 0; // at 12 o'clock = step 0
-        home_log("Home: done!");
-    } else {
-        home_log("Home: move failed!");
-        return ESP_FAIL;
-    }
-
+    s_step_now = 0; // at 12 o'clock = step 0
+    home_log("Home: done!");
     return ESP_OK;
 }
 
@@ -185,63 +162,69 @@ esp_err_t stepper_find_home(void)
 bool stepper_move_to_angle(uint16_t target_raw, int tolerance)
 {
     if (!as5600_is_connected()) {
-        return false; // caller should fall back to open-loop
+        return false;
     }
 
     stepper_enable();
     int steps_taken = 0;
-    const int max_steps = 13000; // safety limit — slightly more than one full revolution (12800)
+    const int max_steps = 13000; // safety limit — slightly more than one full revolution
 
-    // Log initial state for debugging
-    ESP_LOGI(TAG, "move_to_angle: target=%d tol=%d", target_raw, tolerance);
+    // Read initial position
+    uint16_t current;
+    if (as5600_read_raw_angle(&current) != ESP_OK) return false;
+    ESP_LOGI(TAG, "move_to_angle: cur=%d tgt=%d tol=%d", current, target_raw, tolerance);
+
+    int prev_abs_diff = 4096; // track if we're converging or diverging
 
     while (steps_taken < max_steps) {
-        // Read current AS5600 angle
-        uint16_t current;
-        if (as5600_read_raw_angle(&current) != ESP_OK) {
-            return false;
-        }
+        // Read AS5600 angle
+        if (as5600_read_raw_angle(&current) != ESP_OK) return false;
 
-        // Calculate shortest-path difference (positive = CW needed)
+        // Calculate shortest-path difference (positive = target is CW in AS5600 space)
         int diff = as5600_angle_diff(current, target_raw);
         int abs_diff = abs(diff);
 
-        // Log every sensor read for debugging convergence
-        ESP_LOGD(TAG, "m2a: cur=%d tgt=%d diff=%d steps=%d", current, target_raw, diff, steps_taken);
-
-        // Check if within tolerance — target reached
+        // Target reached
         if (abs_diff <= tolerance) {
-            s_step_now = as5600_to_steps(current); // sync step counter with encoder
-            ESP_LOGI(TAG, "move_to_angle: converged at %d (diff=%d, %d steps)", current, diff, steps_taken);
+            s_step_now = as5600_to_steps(current);
+            ESP_LOGI(TAG, "move_to_angle: converged at %d (%d steps)", current, steps_taken);
             return true;
         }
 
-        // Detect oscillation: if we've taken >6400 steps (half rev) something is wrong
-        if (steps_taken > STEPPER_STEPS_PER_REV / 2 && abs_diff > tolerance * 4) {
-            ESP_LOGW(TAG, "move_to_angle: likely oscillating, cur=%d tgt=%d diff=%d", current, target_raw, diff);
+        // Detect divergence: if error increased after a batch, we're going the wrong way
+        if (steps_taken > 100 && abs_diff > prev_abs_diff + 50) {
+            ESP_LOGW(TAG, "move_to_angle: diverging, cur=%d tgt=%d diff=%d", current, target_raw, diff);
             return false;
         }
+        prev_abs_diff = abs_diff;
 
-        // Choose direction — AS5600 is inverted relative to stepper (CW motor = decreasing angle)
+        // Direction: CW motor = decreasing AS5600 angle (inverted)
         bool cw = (diff < 0);
+
+        // Batch size: take multiple steps before re-reading sensor (I2C read is slow)
         int batch;
-        if (abs_diff > 200) {
-            batch = 30;       // far: 30 steps between reads (conservative)
+        if (abs_diff > 500) {
+            batch = 100;      // very far: 100 steps (~32 AS5600 units) between reads
+        } else if (abs_diff > 200) {
+            batch = 50;       // far: 50 steps between reads
         } else if (abs_diff > 50) {
-            batch = 10;       // medium: 10 steps between reads
+            batch = 15;       // medium: 15 steps between reads
         } else if (abs_diff > tolerance * 2) {
-            batch = 3;        // close: 3 steps between reads
+            batch = 5;        // close: 5 steps between reads
         } else {
             batch = 1;        // very close: single-step fine-tuning
         }
 
-        // Take batched steps without reading sensor between them
+        // Execute batch — all steps in same direction without reading sensor
         for (int i = 0; i < batch && steps_taken < max_steps; i++) {
             one_step(cw);
             steps_taken++;
         }
+
+        // Brief settling delay after batch so AS5600 reading stabilizes
+        esp_rom_delay_us(500);
     }
 
-    ESP_LOGW(TAG, "move_to_angle: max_steps exceeded");
+    ESP_LOGW(TAG, "move_to_angle: max_steps exceeded, cur=%d tgt=%d", current, target_raw);
     return false;
 }

@@ -231,13 +231,20 @@ void app_main(void)
                     break;
 
                 case BUTTON_EVENT_B_SHORT:
-                    // +1 hour: advance flipdot display, wrap 12→1
-                    s_current_hour_12 = (s_current_hour_12 % 12) + 1;
-                    ESP_LOGI(TAG, "Btn B short — +1 hour → %d", s_current_hour_12);
+                    // +1 hour: read RTC, add 1 hour, write back, update flipdot display
+                    timekeeping_get_local_time(&local);
+                    local.tm_hour = (local.tm_hour + 1) % 24;  // +1 hour, wrap 23→0
+                    ds3231_set_time(&local);                    // write adjusted time back to RTC
+                    s_current_hour_12 = local.tm_hour % 12;
+                    if (s_current_hour_12 == 0) s_current_hour_12 = 12;
+                    ESP_LOGI(TAG, "Btn B short — +1 hour → %02d:%02d (h12=%d)",
+                             local.tm_hour, local.tm_min, s_current_hour_12);
                     flipdot_power_on();
                     flipdot_show_hour(s_current_hour_12);
                     vTaskDelay(pdMS_TO_TICKS(500));
                     flipdot_power_off();
+                    hr_old = local.tm_hour;  // sync tracker to prevent re-trigger
+                    min_old = local.tm_min;
                     break;
 
                 case BUTTON_EVENT_B_LONG:
@@ -250,11 +257,17 @@ void app_main(void)
                     break;
 
                 case BUTTON_EVENT_C_SHORT:
-                    // +1 minute: advance minute hand by 1 minute worth of steps (ignored during calibration)
+                    // +1 minute: read RTC, add 1 min, write back, move minute hand
                     if (!calibration_is_active()) {
-                        ESP_LOGI(TAG, "Btn C short — +1 minute");
-                        int steps_per_min = STEPPER_STEPS_PER_REV / 60;
-                        stepper_multi_step(steps_per_min, true); // CW
+                        timekeeping_get_local_time(&local);
+                        local.tm_min = (local.tm_min + 1) % 60;    // +1 min, wrap 59→0
+                        if (local.tm_min == 0) local.tm_hour = (local.tm_hour + 1) % 24; // carry
+                        local.tm_sec = 0;                           // reset seconds
+                        ds3231_set_time(&local);                    // write adjusted time back to RTC
+                        ESP_LOGI(TAG, "Btn C short — +1 min → %02d:%02d", local.tm_hour, local.tm_min);
+                        clock_update_minute(&local);
+                        min_old = local.tm_min;  // sync tracker to prevent re-trigger
+                        hr_old = local.tm_hour;
                     }
                     break;
 

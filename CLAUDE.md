@@ -4,11 +4,11 @@
 The FlipDotCircleClock is a flip-dot circle clock currently running as a single ~103KB CircuitPython `code.py` on an **Unexpected Maker FeatherS3** (ESP32-S3 240MHz dual-core, 2.4GHz WiFi + BLE 5.0). The goal is to port it to ESP-IDF 6.0 C for better performance, real-time control, and FreeRTOS task management.
 
 **Hardware controlled:**
-- DS3231 RTC (I2C 0x68), SH1107 OLED 128x64 (I2C 0x3C), AS5600 magnetic encoder (I2C 0x36, optional)
-- 3-column × 4-row flip-dot matrix (12 dots, 24V via relay on IO11, SPI control)
+- DS3231 RTC (I2C 0x68), SH1107 OLED 128x64 (I2C 0x3C), AS5600 magnetic encoder (I2C 0x36)
+- 3-column × 4-row flip-dot matrix (12 dots, 24V via relay on IO11, bit-banged SPI control)
 - TMC2209 stepper driver: MT-1701HSM140AE 0.9°/step motor, 400 base steps × 32 microsteps = **12,800 steps/rev**
-- Hall effect sensor (A3144) for home position, NeoPixel LED (IO48), 3 buttons
-- WiFi with NTP, HTTP web server on port 80
+- AS5600 magnetic encoder for PID closed-loop positioning (±0.4° accuracy), NeoPixel LED (IO40), 3 buttons
+- WiFi with NTP, HTTP web server on port 80 (planned Steps 12-13)
 
 ## Commit Rule: Always Update README.md
 
@@ -69,234 +69,199 @@ Use FreeRTOS queues for cross-core command passing (web API → clock_task).
 
 **No BLE** — not needed for current features. Can be added later if a use case emerges.
 
-## File Structure (final target)
+## File Structure (current + planned)
 
 ```
 FlipDotCircleClock/
 ├── CMakeLists.txt
 ├── sdkconfig.defaults
+├── components/
+│   └── esp_as5600/             # dddGR/esp_as5600 library (https://github.com/dddGR/esp_as5600)
+│       ├── CMakeLists.txt
+│       ├── esp_as5600.c
+│       └── include/esp_as5600.h
 ├── main/
 │   ├── CMakeLists.txt
-│   ├── idf_component.yml
-│   ├── main.c                  # App entry, init sequence, clock task
-│   ├── gpio_config.h           # All pin definitions
-│   ├── ds3231.c / .h           # RTC driver (I2C)
-│   ├── as5600.c / .h           # Magnetic encoder driver (I2C)
-│   ├── oled_display.c / .h     # SH1107 OLED via esp_lcd
-│   ├── flipdot.c / .h          # Flip-dot SPI control + relay power
-│   ├── stepper.c / .h          # TMC2209 motor control + homing
-│   ├── timekeeping.c / .h      # Timezone, DST, NTP sync, RTC sync
-│   ├── network.c / .h          # WiFi connect/recover/health
-│   ├── web_server.c / .h       # HTTP server + JSON API
-│   ├── nvm_storage.c / .h      # NVS-based persistent config
-│   ├── animations.c / .h       # Demo, chaos, sync sequences
-│   ├── calibration.c / .h      # AS5600 calibration routines
-│   ├── ota_update.c / .h       # GitHub release OTA updates
-│   └── action_log.c / .h      # Ring buffer + persistent LittleFS logging
-├── partitions.csv              # Custom partition table (factory + ota_0 + ota_1 + littlefs)
+│   ├── idf_component.yml      # espressif/led_strip, espressif/button, espressif/pid_ctrl, u8g2
+│   ├── main.c                  # setup() + main clock loop, button handlers
+│   ├── gpio_config.h           # All pin definitions + stepper constants
+│   ├── neopixel.c / .h         # WS2812 NeoPixel via RMT (GPIO 40)
+│   ├── ds3231.c / .h           # DS3231 RTC I2C driver (0x68)
+│   ├── as5600.c / .h           # AS5600 encoder wrapper (reads ANGLE register 0x0E, not RAW_ANGLE)
+│   ├── oled_display.c / .h     # SH1107 OLED via U8G2 library + scrolling terminal mode
+│   ├── flipdot.c / .h          # Flip-dot bit-banged SPI + SUP/SET/RES encoding + relay power
+│   ├── stepper.c / .h          # TMC2209 motor control + PID closed-loop via AS5600
+│   ├── timekeeping.c / .h      # Timezone, DST definitions, clock_update_minute/hour
+│   ├── nvm_storage.c / .h      # NVS-based persistent config (timezone, step delay, calibration)
+│   ├── buttons.c / .h          # espressif/button component wrapper (A/B/C short+long press)
+│   ├── calibration.c / .h      # AS5600 calibration enter/save/cancel with 3s cooldown
+│   ├── animations.c / .h       # (Step 10) Demo, chaos, sync sequences
+│   ├── network.c / .h          # (Step 12) WiFi connect/recover/health
+│   ├── web_server.c / .h       # (Step 13) HTTP server + JSON API
+│   └── ota_update.c / .h       # (Step 13) GitHub release OTA updates
+├── partitions.csv              # (Step 13) Custom partition table
 └── frontend/
-    └── index.html              # Web UI (embed via SPIFFS or embed binary)
+    └── index.html              # (Step 13) Web UI
 ```
 
 ---
 
-## Step 1: Project Skeleton + GPIO Definitions + LED Blink
+## Step 1: Project Skeleton + GPIO Definitions + LED Blink ✅
 
-**Goal:** Bootable ESP-IDF project that proves the toolchain works.
+**Implemented:**
+- Root `CMakeLists.txt`, `main/CMakeLists.txt`, `sdkconfig.defaults` (ESP32-S3, 16MB flash, 240MHz, USB CDC console)
+- `gpio_config.h` — all pin definitions + stepper constants (STEPPER_STEPS_PER_REV=12800, STEPPER_DEFAULT_DELAY_US=450)
+- `neopixel.c/.h` — modular WS2812 driver on GPIO 40 via `espressif/led_strip` + RMT peripheral
+  - `neopixel_init()`, `neopixel_set_color(r,g,b)`, `neopixel_off()`
+- `main.c` — blinks NeoPixel purple at 1 Hz
 
-**Implement:**
-- Root `CMakeLists.txt`, `main/CMakeLists.txt`, `sdkconfig.defaults`
-- `gpio_config.h` — all pin definitions from CircuitPython code:
-  - Stepper: EN(6), STEP(12), DIR(5), MS(17)
-  - SPI flip-dot: SCK(36), MOSI(35), CS/LATCH(37), OE(18)
-  - Relay: GPIO 11
-  - Hall sensor: GPIO 14
-  - Buttons: GPIO 1, 38, 33
-  - I2C: SDA(8), SCL(9)
-  - NeoPixel: GPIO 48
-- `main.c` — minimal app_main() that blinks NeoPixel LED via RMT/LED strip driver
-- `idf_component.yml` — declare `espressif/led_strip` dependency
-
-**ESP-IDF APIs:** `gpio`, `led_strip` component
-
-**Verify:** Build, flash, see NeoPixel toggling. Confirm serial monitor output.
+**Dependencies:** `espressif/led_strip: "^3.0.0"`
 
 ---
 
-## Step 2: I2C Bus + DS3231 RTC Driver
+## Step 2: I2C Bus + DS3231 RTC Driver ✅
 
-**Goal:** Read time from the DS3231 RTC over I2C.
-
-**Implement:**
+**Implemented:**
 - `ds3231.c/.h` — I2C driver for DS3231 (address 0x68)
-  - `ds3231_init(i2c_master_bus_handle_t *ret_bus_handle)` — creates shared I2C bus, returns handle for OLED/AS5600
-  - `ds3231_get_time(struct tm *time)` — read BCD registers, convert
+  - `ds3231_init(i2c_master_bus_handle_t *ret_bus_handle)` — creates shared I2C master bus (SDA=8, SCL=9, 400kHz), returns handle for OLED/AS5600
+  - `ds3231_get_time(struct tm *time)` — burst-read 7 BCD registers, convert to struct tm
   - `ds3231_set_time(const struct tm *time)` — write BCD registers
-  - `ds3231_set_time_from_compile()` — seed RTC with `__DATE__`/`__TIME__` on every boot
-- Print current RTC time to serial every second
+- Compile-time RTC seeding: `__DATE__`/`__TIME__` parsed in `main.c` (not ds3231.c) so it recompiles every build
+- **RTC convention:** stores local time directly (not UTC). Timezone offset deferred to Step 12 when NTP is added.
 
-**ESP-IDF APIs:** `i2c_master` (new driver in v5.x+), `esp_log`
-
-**Verify:** Serial output shows correct date/time from RTC. Compile-time seeding sets RTC on each flash.
+**ESP-IDF APIs:** `i2c_master` (new driver), `esp_log`
 
 ---
 
-## Step 3: OLED Display (SH1107)
+## Step 3: OLED Display (SH1107) ✅
 
-**Goal:** Status display showing time, network info, motor position.
-
-**Implement:**
-- `oled_display.c/.h`:
-  - `oled_init(i2c_master_bus_handle_t bus)` — initialize SH1107 via `esp_lcd` panel driver
-  - `oled_update_time(const struct tm *time)` — HH:MM:SS display
-  - `oled_update_status(const char *ip, int rssi, uint32_t uptime, int motor_pos)`
+**Implemented:**
+- `oled_display.c/.h` — SH1107 128x64 OLED via **U8G2 library** (not esp_lcd/LVGL)
+  - `oled_init(i2c_master_bus_handle_t bus)` — U8G2 setup with `u8g2_Setup_sh1107_i2c_64x128_f()`, 90° rotation to 128x64 landscape
+  - `oled_update_time(const struct tm *time)` — large HH:MM:SS (14px font) + date (8px font)
+  - `oled_update_status(const char *ip, int rssi, uint32_t uptime, int motor_pos)` — 3-line status
+  - `oled_terminal_print(const char *line)` — scrolling 8-line terminal (5x7 monospace font) for homing/debug output
   - `oled_clear()`
-  - Use LVGL or direct framebuffer writes for text rendering
-- `idf_component.yml` — add `espressif/ssd1306` component (supports SH1107)
+- I2C byte callback + GPIO/delay callback for U8G2 ↔ ESP-IDF I2C bridge
+- Display task shows live AS5600 angle during calibration mode
 
-**ESP-IDF APIs:** `esp_lcd`, `esp_lcd_panel_io_i2c`, `espressif/ssd1306` component
-
-**Verify:** OLED shows current time from RTC, refreshing every second. Status fields display placeholder data.
+**Dependencies:** `u8g2` (git: olikraus/u8g2)
 
 ---
 
-## Step 4: NVS Storage Module
+## Step 4: NVS Storage Module ✅
 
-**Goal:** Persistent configuration storage matching CircuitPython NVM layout.
-
-**Implement:**
-- `nvm_storage.c/.h` — NVS wrapper:
-  - `nvm_init()` — open NVS namespace, check magic byte
-  - `nvm_get/set_timezone_index()`
-  - `nvm_get/set_home_offset()`
-  - `nvm_get/set_step_delay()`
-  - `nvm_get/set_as5600_cal_angle()`
-  - `nvm_factory_reset()` — restore defaults
-- Defaults: timezone=0 (US/Eastern), step_delay=450µs, home_offset=0
-- NVM layout mirrors CircuitPython: bytes 0-5 timezone, bytes 6-7 AS5600 cal angle, bytes 8+ motor speed
+**Implemented:**
+- `nvm_storage.c/.h` — NVS wrapper (namespace: "flipclock")
+  - `nvm_init()` — init NVS flash, open namespace, write defaults on first boot (magic byte 0xFC)
+  - `nvm_get/set_timezone_index()` — uint8_t (0–17)
+  - `nvm_get/set_home_offset()` — int16_t (signed step offset)
+  - `nvm_get/set_step_delay()` — uint16_t (microseconds)
+  - `nvm_get/set_as5600_cal_angle()` — uint16_t (12-bit raw angle)
+  - `nvm_factory_reset()` — erase all keys, rewrite defaults
+- Defaults: timezone=0 (US/Eastern), step_delay=450µs, home_offset=0, as5600_cal=0
+- Each setter commits to flash immediately via `nvs_commit()`
 
 **ESP-IDF APIs:** `nvs_flash`, `nvs`
 
-**Verify:** Write values, reboot, read back — values persist. Factory reset clears to defaults.
+---
+
+## Step 5: Stepper Motor Control ✅
+
+**Implemented:**
+- `stepper.c/.h` — TMC2209 driver:
+  - `stepper_init()` — configure GPIOs (EN=6, STEP=12, DIR=5, MS=17), 32x microstepping, load step delay from NVS
+  - `stepper_enable() / stepper_disable()` — EN pin LOW/HIGH for motor torque control
+  - `stepper_multi_step(int steps, bool clockwise)` — pulse generation with 2µs high-time + configurable delay
+  - `stepper_find_home()` — open-loop CW to step position 0, then PID fine-tune to calibrated AS5600 angle
+  - `stepper_get_position() / stepper_set_position()` — software step counter (0–12799, wraps)
+  - `stepper_move_to_angle(uint16_t target_raw, int tolerance)` — PID closed-loop positioning via AS5600
+- **Hall sensor removed** from code (PIN_HALL_SENSOR still defined in gpio_config.h). Homing uses AS5600 calibration.
+- PID controller: `espressif/pid_ctrl` v0.2.0, positional mode, Kp=0.5, Kd=0.1, CW-only, ±5 AS5600 unit tolerance (±0.4°)
+- `home_log()` helper prints to both serial and OLED terminal during homing
+
+**ESP-IDF APIs:** `gpio`, `esp_rom_delay_us`, `pid_ctrl`
+**Dependencies:** `espressif/pid_ctrl: "^0.2.0"`
 
 ---
 
-## Step 5: Stepper Motor Control + Hall Sensor Homing
+## Step 6: AS5600 Magnetic Encoder + Calibration ✅
 
-**Goal:** Drive the TMC2209 stepper and home to 12 o'clock position.
-
-**Implement:**
-- `stepper.c/.h`:
-  - `stepper_init()` — configure GPIOs (EN, STEP, DIR, MS), enable 32-microstep mode
-  - `stepper_enable() / stepper_disable()` — motor holding torque (EN pin low/high). Default: enabled. Togglable via web API.
-  - `stepper_multi_step(int steps, bool clockwise)` — pulse generation with configurable delay
-  - `stepper_find_home()` — symmetric Hall sensor edge detection (port `findExactHome()` logic)
-  - `stepper_get_position() / stepper_set_position()` — track step count
-- Hall sensor: GPIO 14 input with pull-up, read during homing
-- Constants: 12800 steps/rev, configurable step delay from NVS
-
-**ESP-IDF APIs:** `gpio`, `esp_timer` (for µs-precision step pulses), `esp_rom_delay_us`
-
-**Verify:** Motor homes reliably to 12 o'clock. Serial logs show Hall transitions. `stepper_multi_step(12800, true)` does exactly one full revolution.
-
----
-
-## Step 6: AS5600 Magnetic Encoder + Closed-Loop Motor Control
-
-**Goal:** Read absolute angle and implement closed-loop positioning.
-
-**Implement:**
-- `as5600.c/.h`:
-  - `as5600_init(i2c_master_bus_handle_t bus)` — probe address 0x36, detect presence
-  - `as5600_read_raw_angle()` — 12-bit value (0-4095)
-  - `as5600_is_connected()` — availability check for fallback logic
+**Implemented:**
+- `as5600.c/.h` — wrapper around `dddGR/esp_as5600` local component:
+  - `as5600_setup(i2c_master_bus_handle_t bus)` — attach to shared I2C bus at 0x36, log magnet status/AGC/magnitude
+  - `as5600_read_raw_angle()` — reads **ANGLE register (0x0E:0x0F)**, not RAW_ANGLE (0x0C:0x0D which only gives 0–2048 due to start/stop programming)
+  - `as5600_is_connected()`, `as5600_to_degrees()`, `as5600_angle_diff()`, `as5600_to_steps()`, `as5600_minute_to_raw()`
+  - `as5600_debug_dump()` — reads all angle registers + status for diagnostics
 - `calibration.c/.h`:
-  - `calibration_enter()` — disable motor, prompt user
-  - `calibration_save()` — read AS5600, store to NVS
-  - `calibration_cancel()`
-  - `calibration_get_offset()` — load from NVS
-- Extend `stepper.c`:
-  - `stepper_move_to_angle(uint16_t target_angle)` — closed-loop move using AS5600 feedback
-  - Fallback to open-loop `multi_step()` if AS5600 unavailable
+  - `calibration_enter()` — motor stays **enabled** (user positions hand against holding torque), 3s minimum before save accepted
+  - `calibration_save()` — read AS5600 angle, save to NVS as 12 o'clock reference
+  - `calibration_cancel()`, `calibration_get_offset()`, `calibration_ready_to_save()`, `calibration_is_active()`
+  - Display task shows live AS5600 angle on OLED during calibration
+- **Critical lesson:** AS5600 RAW_ANGLE register gives half-range (0–2048) on this hardware. ANGLE register gives full 0–4095.
 
-**ESP-IDF APIs:** `i2c_master`
-
-**Verify:** Serial prints raw angle as motor rotates manually. `stepper_move_to_angle()` converges to target within ±2 steps. Calibration persists across reboots.
+**Local component:** `components/esp_as5600/` (https://github.com/dddGR/esp_as5600)
 
 ---
 
-## Step 7: Flip-Dot Display (SPI + Relay Power Management)
+## Step 7: Flip-Dot Display (Bit-Banged SPI + Relay) ✅
 
-**Goal:** Control the 3x4 flip-dot matrix with proper 24V relay sequencing.
+**Implemented:**
+- `flipdot.c/.h` — bit-banged SPI (not `spi_master` driver) with SUP/SET/RES encoding:
+  - `flipdot_init()` — configure GPIO outputs: SCK(36), MOSI(35), LATCH(37), OE(18), RELAY(11)
+  - `flipdot_set_pattern(const uint8_t cols[3])` — encode 4-bit dot patterns into 12-bit shift register words (3 bits per dot: SUP=enable, SET=on, RES=off), column staggering (100ms between columns)
+  - `flipdot_power_on()` / `flipdot_power_off()` — relay with 200ms precharge delay
+  - `flipdot_extend_power_window()` / `flipdot_service_power_window()` — 80ms relay hold timer
+  - `flipdot_show_hour(int hour)` — lookup table mapping hours 1–12 to 3-column bit patterns
+  - `flipdot_blank()` / `flipdot_all_on()`
+  - `shift_data()` mirrors CircuitPython `shiftData()` exactly: OE enable → shift 3×16-bit data → latch → 5ms settle → shift zeros → latch → OE disable
+- Column order reversed to match CircuitPython: `colData = [dataIn[2], dataIn[1], dataIn[0]]`
+- XOR optimization: only actuate dots that changed state (tracked via `s_old_cols[]` cache)
 
-**Implement:**
-- `flipdot.c/.h`:
-  - `flipdot_init()` — configure SPI bus (SCK=36, MOSI=35, CS=37), OE pin (18), relay pin (11)
-  - `flipdot_set_pattern(uint8_t pattern[4])` — send 4-byte pattern via SPI, toggle latch/OE
-  - `flipdot_power_on()` / `flipdot_power_off()` — relay with 200ms precharge delay, 80ms hold after last flip
-  - `flipdot_extend_power_window()` — prevent relay chatter during rapid updates
-  - Column staggering: 500ms between columns to allow capacitor recharge and prevent inrush brownout
-  - `flipdot_show_hour(int hour)` — map 1-12 hour to bit pattern
-  - `flipdot_blank()` / `flipdot_all_on()` — test patterns
-
-**ESP-IDF APIs:** `spi_master`, `gpio`, `esp_timer`
-
-**Verify:** Call `flipdot_show_hour(3)` — correct 3 dots flip. `flipdot_blank()` then `flipdot_all_on()` cycles all dots. Relay precharge timing verified with scope/multimeter.
+**ESP-IDF APIs:** `gpio`, `esp_timer`
 
 ---
 
-## Step 8: Timekeeping — Timezone, DST, Clock Update Logic
+## Step 8: Timekeeping — Timezone, DST, Clock Update Logic ✅
 
-**Goal:** Clock runs autonomously using RTC time with proper timezone/DST. Motor and flipdots update on schedule.
-
-**Implement:**
+**Implemented:**
 - `timekeeping.c/.h`:
-  - `timekeeping_init()` — load timezone from NVS, read RTC
-  - `timekeeping_get_local_time(struct tm *time)` — RTC + timezone offset + DST
-  - `timekeeping_set_timezone(int tz_index)` — update NVS, recalculate
-  - `timekeeping_apply_dst(struct tm *utc, int tz_index)` — port DST rules:
-    - US: 2nd Sun Mar → 1st Sun Nov
-    - EU: Last Sun Mar → Last Sun Oct
-    - AU: 1st Sun Oct → 1st Sun Apr
-    - NZ: Last Sun Sep → 1st Sun Apr
-  - `timekeeping_sync_from_ntp(time_t ntp_time)` — update RTC (stub for now, used in Step 12)
-- 18 timezone definitions as const struct array
-- `clock_update_minute()` — move stepper to current minute (AS5600 closed-loop or open-loop fallback)
-- `clock_update_hour()` — update flip-dot display for current hour (relay on → blank → show hour → relay off)
-- Scheduling: RTC comparison-based (port of CircuitPython main loop):
-  - Track `sec_old`, `min_old`, `hr_old` — compare against RTC each loop iteration
-  - Every second: update OLED time display
-  - Every minute: call `clock_update_minute()`
-  - Every hour: call `clock_update_hour()`, re-home motor to 12 o'clock, then position to current minute
+  - `timekeeping_init()` — load timezone index from NVS
+  - `timekeeping_get_local_time(struct tm *time)` — reads RTC directly (pre-NTP: RTC stores local time). Timezone/DST offset code exists but is bypassed until NTP is added in Step 12.
+  - `timekeeping_set_timezone(int tz_index)` — update NVS
+  - DST rules implemented: `is_dst_us()`, `is_dst_eu()`, `is_dst_au()`, `is_dst_nz()` with `nth_weekday()` helper
+  - `timekeeping_sync_from_ntp(time_t utc_epoch)` — stub, writes UTC to RTC
+  - 18 timezone definitions as `const timezone_def_t[]` with key, display name, UTC offset, DST rule
+- `clock_update_minute()` — PID closed-loop only (no open-loop bulk move): calls `stepper_move_to_angle()` with AS5600 target. Falls back to open-loop if uncalibrated.
+- `clock_update_hour()` — relay on → blank → show hour (12h format) → relay off
+- `main.c` clock loop: RTC comparison-based (`min_old`, `hr_old` trackers)
+  - Every second: display task updates OLED (separate FreeRTOS task)
+  - Every minute: `clock_update_minute()` via PID
+  - Every hour: `clock_update_hour()` + `stepper_find_home()` + `clock_update_minute()`
+  - Clock updates skipped during calibration mode
+- `setup()` function: single clean startup sequence (blank → home → show hour → set minute), pre-sets trackers to avoid duplicate first update
 
-**ESP-IDF APIs:** `time.h` (POSIX), `sys/time.h`
-
-**Verify:** Correct local time with timezone offset. Minute hand advances each minute. Flip-dots update each hour. Motor re-homes hourly.
+**ESP-IDF APIs:** `time.h` (POSIX)
 
 ---
 
-## Step 9: Full Button Input + Calibration
+## Step 9: Full Button Input + Calibration ✅
 
-**Goal:** All 3 buttons functional with short/long press detection (2.0s threshold).
+**Implemented:**
+- `buttons.c/.h` — uses **`espressif/button` v4.1.6** component (not custom ISR):
+  - `buttons_init()` — creates 3 GPIO buttons with `iot_button_new_gpio_device()`, registers `BUTTON_SINGLE_CLICK` and `BUTTON_LONG_PRESS_START` callbacks
+  - 2.0s long-press threshold — fires while button is still held (no release needed)
+  - Events posted to FreeRTOS queue: `BUTTON_EVENT_A_SHORT/LONG`, `BUTTON_EVENT_B_SHORT/LONG`, `BUTTON_EVENT_C_SHORT/LONG`
+- Button A short: home minute hand to 12 o'clock and stay
+- Button A long: AS5600 live debug mode (motor off, continuous angle readout, press C to exit)
+- Button B short: +1 hour (write RTC, update flipdots)
+- Button B long: animation placeholder (Step 10)
+- Button C short: +1 minute (write RTC, PID move to correct position)
+- Button C long: enter/confirm AS5600 calibration (3s cooldown between enter and save)
+- Hardware mutex: `xSemaphoreCreateMutex()` protects stepper + flipdot. All button handlers suspend display task + acquire mutex before acting.
+- Display task suspended during all button actions to prevent OLED conflicts
 
-**Implement:**
-- Extend `buttons.c/.h`:
-  - Add Button A (GPIO 1) with ISR
-  - Add long-press detection: track press duration, emit separate short/long events
-  - `BUTTON_EVENT_A_SHORT` / `BUTTON_EVENT_A_LONG`
-  - `BUTTON_EVENT_B_SHORT` / `BUTTON_EVENT_B_LONG`
-  - `BUTTON_EVENT_C_SHORT` / `BUTTON_EVENT_C_LONG`
-- Button A short: re-home sequence (blank display → home motor → update hour + minute)
-- Button A long: reserved for WiFi reconnect (no-op until Step 12)
-- Button B short: +1 hour (advance flipdot display, wrap 12→1)
-- Button B long: trigger sync animation (Step 10)
-- Button C short: +1 minute (advance minute hand one step position)
-- Button C long: enter/confirm AS5600 calibration (wire into existing `calibration.c`)
-- Stepper/flipdot mutex: `xSemaphoreCreateMutex()` to protect motor and flipdot access from concurrent button presses and clock updates
-
-**ESP-IDF APIs:** `gpio` ISR, `freertos/semphr.h`, `esp_timer` (for press duration)
-
-**Verify:** Each button produces correct short/long events. +1 hour/minute works. Calibration enter/save works via long-press C. No motor conflicts between button presses and clock updates.
+**Dependencies:** `espressif/button: "^4.1.6"`
 
 ---
 

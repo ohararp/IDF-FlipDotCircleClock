@@ -32,6 +32,10 @@ static SemaphoreHandle_t s_hw_mutex = NULL;
 // Track current displayed hour so +1 hour can wrap correctly
 static int s_current_hour_12 = 0;
 
+// Startup trackers — set by setup() so main loop doesn't duplicate the first update
+static int s_startup_hr = -1;
+static int s_startup_min = -1;
+
 // ── Background tasks ─────────────────────────────────────────────────────────
 
 // Task: toggle NeoPixel purple/off at 500 ms — visual heartbeat during startup
@@ -135,18 +139,37 @@ static void setup(void)
     // 4. Flip-dot display (SPI bit-bang + 24V relay)
     ESP_ERROR_CHECK(flipdot_init());
 
-    // 5. Stepper motor + homing
+    // 5. Stepper motor init
     ESP_ERROR_CHECK(stepper_init());
-    stepper_find_home();
 
-    // 6. Set initial clock state from local time
+    // 6. Startup sequence: blank dots → home → set hour → set minute (one pass, no repeats)
     struct tm local;
     if (timekeeping_get_local_time(&local) == ESP_OK) {
-        clock_update_hour(&local);
-        clock_update_minute(&local);
+        // Blank flipdots first
+        flipdot_power_on();
+        flipdot_blank();
+        vTaskDelay(pdMS_TO_TICKS(500));
+        flipdot_power_off();
+
+        // Home minute hand to 12 o'clock
+        stepper_find_home();
+
+        // Set flipdot hour display
         s_current_hour_12 = local.tm_hour % 12;
         if (s_current_hour_12 == 0) s_current_hour_12 = 12;
-        ESP_LOGI(TAG, "Clock set to %02d:%02d", local.tm_hour, local.tm_min);
+        flipdot_power_on();
+        flipdot_show_hour(s_current_hour_12);
+        vTaskDelay(pdMS_TO_TICKS(500));
+        flipdot_power_off();
+
+        // Move minute hand to current minute
+        clock_update_minute(&local);
+
+        ESP_LOGI(TAG, "Clock set to %02d:%02d (h12=%d)", local.tm_hour, local.tm_min, s_current_hour_12);
+
+        // Pre-set trackers so main loop doesn't re-trigger on first iteration
+        s_startup_hr = local.tm_hour;
+        s_startup_min = local.tm_min;
     }
 
     // 7. Hardware mutex — protects stepper + flipdot from concurrent access
@@ -167,8 +190,8 @@ void app_main(void)
 
     // ── Main clock loop: RTC comparison-based scheduling + button handling ────
 
-    // Initialize trackers to impossible values so first loop triggers all updates
-    int min_old = -1, hr_old = -1;
+    // Initialize trackers from startup so main loop doesn't repeat the first update
+    int min_old = s_startup_min, hr_old = s_startup_hr;
     struct tm local;
     app_button_event_t event;
 
@@ -282,9 +305,8 @@ void app_main(void)
                         local.tm_sec = 0;                           // reset seconds
                         ds3231_set_time(&local);                    // write adjusted time back to RTC
                         ESP_LOGI(TAG, "Btn C short — +1 min → %02d:%02d", local.tm_hour, local.tm_min);
-                        // Simple open-loop advance by 1 minute of steps (no AS5600 closed-loop)
-                        int steps_per_min = STEPPER_STEPS_PER_REV / 60; // 213 steps
-                        stepper_multi_step(steps_per_min, true);    // CW
+                        // Move minute hand to correct position using PID closed-loop
+                        clock_update_minute(&local);
                         min_old = local.tm_min;  // sync tracker to prevent re-trigger
                         hr_old = local.tm_hour;
                     }

@@ -37,8 +37,8 @@ idf.py -p /dev/cu.usbmodem1101 flash monitor
 - [x] **Step 7:** Flip-dot display (SPI + relay) + Button B test trigger
 - [x] **Step 8:** Timekeeping (timezone, DST, minute/hour update scheduling)
 - [x] **Step 9:** Full button input, PID closed-loop AS5600 positioning (±0.4°), calibration flow
-- [x] **Step 10:** Animations (demo, chaos, sync) with PID positioning
-- [ ] **Step 11:** Integration + polish (standalone soak test, watchdog, brown-out)
+- [x] **Step 10:** Animations (sync) with PID positioning (±0.09°), trapezoidal ramping
+- [x] **Step 11:** Skipped — standalone clock functional, soak testing during Step 12
 - [ ] **Step 12:** WiFi + NTP synchronization
 - [ ] **Step 13:** HTTP web server + JSON API + OTA updates
 

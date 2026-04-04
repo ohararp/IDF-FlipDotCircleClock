@@ -143,35 +143,36 @@ void stepper_set_position(int position)
     s_step_now = position % STEPPER_STEPS_PER_REV;
 }
 
-// Home to 12 o'clock — open-loop CW to position 0, then PID fine-tune if AS5600 calibrated
+// Home to 12 o'clock using AS5600 PID closed-loop (or open-loop fallback if uncalibrated)
 esp_err_t stepper_find_home(void)
 {
     home_log("Home: starting...");
     stepper_enable();
 
-    // Open-loop: CW to step position 0 (12 o'clock)
-    int steps_to_home = (STEPPER_STEPS_PER_REV - s_step_now) % STEPPER_STEPS_PER_REV;
-    home_log("Home: pos=%d moving %d CW", s_step_now, steps_to_home);
+    if (as5600_is_connected()) {
+        uint16_t home_angle = calibration_get_offset();
+        if (home_angle != 0) {
+            // PID closed-loop: move directly to calibrated 12 o'clock angle
+            home_log("Home: PID to %d", home_angle);
+            if (stepper_move_to_angle(home_angle, 5)) {
+                s_step_now = 0; // at 12 o'clock = step 0
+                home_log("Home: done!");
+                return ESP_OK;
+            }
+            home_log("Home: PID failed!");
+            return ESP_FAIL;
+        }
+        home_log("Home: not calibrated! Hold C to cal");
+        return ESP_ERR_NOT_FOUND;
+    }
 
+    // Open-loop fallback: CW to step position 0 (no AS5600)
+    int steps_to_home = (STEPPER_STEPS_PER_REV - s_step_now) % STEPPER_STEPS_PER_REV;
+    home_log("Home: open-loop %d CW", steps_to_home);
     if (steps_to_home > 0) {
         stepper_multi_step(steps_to_home, true);
     }
     s_step_now = 0;
-
-    // PID fine-tune: if AS5600 is connected and calibrated, move to exact calibrated angle
-    if (as5600_is_connected()) {
-        uint16_t home_angle = calibration_get_offset();
-        if (home_angle != 0) {
-            home_log("Home: PID tune to %d", home_angle);
-            if (stepper_move_to_angle(home_angle, 5)) { // ±5 AS5600 units ≈ ±0.4°
-                s_step_now = 0; // confirmed at 12 o'clock
-                home_log("Home: PID done!");
-            } else {
-                home_log("Home: PID failed, using open-loop");
-            }
-        }
-    }
-
     home_log("Home: done!");
     return ESP_OK;
 }

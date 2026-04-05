@@ -14,6 +14,9 @@ static const char *TAG = "oled";
 // U8G2 display context — holds framebuffer and display state
 static u8g2_t s_u8g2;
 
+// Track if OLED was successfully initialized (prevents crash if I2C bus fails)
+static bool s_oled_initialized = false;
+
 // I2C bus handle passed in from ds3231_init(), shared across all I2C devices
 static i2c_master_bus_handle_t s_bus_handle;
 
@@ -120,6 +123,7 @@ esp_err_t oled_init(i2c_master_bus_handle_t bus_handle)
     u8g2_DrawStr(&s_u8g2, 20, 35, "FlipDotClock");
     u8g2_SendBuffer(&s_u8g2);
 
+    s_oled_initialized = true;
     ESP_LOGI(TAG, "SH1107 OLED initialized at 0x%02X (128x64, U8G2)", OLED_I2C_ADDR);
     return ESP_OK;
 }
@@ -134,6 +138,7 @@ static void draw_centered(const char *str, int y)
 // Main display: time, status, network info, IP, date — matches CircuitPython layout
 void oled_update_main(const struct tm *time, const char *status_text)
 {
+    if (!s_oled_initialized) return;
     char time_str[9];   // "HH:MM:SS\0"
     char date_str[36];  // "YYYY-MM-DD\0"
     char wifi_col[12];  // "WiFi:OK" etc
@@ -204,6 +209,7 @@ void oled_update_main(const struct tm *time, const char *status_text)
 // Clear the OLED framebuffer and push blank screen to display
 void oled_clear(void)
 {
+    if (!s_oled_initialized) return;
     u8g2_ClearBuffer(&s_u8g2);
     u8g2_SendBuffer(&s_u8g2);
 }
@@ -220,6 +226,7 @@ static int s_term_count = 0; // total lines added (for indexing into ring buffer
 // Append a line to the scrolling terminal and immediately render to OLED
 void oled_terminal_print(const char *line)
 {
+    if (!s_oled_initialized) return; // skip if OLED not available
     // Write into ring buffer at next slot
     int idx = s_term_count % TERM_MAX_LINES;
     strncpy(s_term_lines[idx], line, TERM_LINE_LEN - 1);
@@ -285,6 +292,7 @@ static void qr_display_callback(esp_qrcode_handle_t qrcode)
 // Display a QR code on the OLED with label text
 void oled_show_qr(const char *text)
 {
+    if (!s_oled_initialized) return;
     s_qr_u8g2_ptr = &s_u8g2; // pass U8G2 context to callback
 
     esp_qrcode_config_t cfg = {

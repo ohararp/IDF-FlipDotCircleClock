@@ -20,6 +20,7 @@
 #include "driver/gpio.h"
 #include "timekeeping.h"
 #include "network.h"
+#include "web_server.h"
 
 static const char *TAG = "main";
 
@@ -155,6 +156,9 @@ static void setup(void)
 
     // 4. WiFi (non-blocking — connects in background if credentials stored, skips if not)
     network_init();
+
+    // 4b. Web server — start immediately, serves pages once WiFi connects
+    web_server_start();
 
     // If BLE provisioning is active, hold here with QR on OLED until done or C to skip
     // Uses raw GPIO polling for Button C — espressif/button timer may not work during BLE

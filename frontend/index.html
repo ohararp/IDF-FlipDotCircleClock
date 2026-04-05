@@ -114,8 +114,6 @@
             <button id="btnHome">Home</button>
             <button id="btnWipe">Wipe Display</button>
             <button id="btnRefresh">Refresh Hour</button>
-          </div>
-          <div class="actions">
             <button id="btnAnimSync">Sync Animation</button>
           </div>
 
@@ -136,11 +134,6 @@
             <button id="btnSetSpeed">Set</button>
             <span style="font-size:12px;opacity:0.8;">Current: <span id="currentSpeed">450</span> μs</span>
           </div>
-          <div class="actions">
-            <button id="btnStepperEn">Enable Motor</button>
-            <button id="btnStepperDis">Disable Motor</button>
-          </div>
-
           <h2 style="margin-top:14px;">Calibration</h2>
           <div class="actions" id="calNormal">
             <button id="btnCalStart">Calibrate AS5600</button>
@@ -282,8 +275,6 @@
   $('btnWipe').onclick=function(){action('/wipe');};
   $('btnRefresh').onclick=function(){action('/refresh');};
   $('btnAnimSync').onclick=function(){action('/anim/sync');};
-  $('btnStepperEn').onclick=function(){action('/stepper_enable');};
-  $('btnStepperDis').onclick=function(){action('/stepper_disable');};
   $('btnSetSpeed').onclick=function(){
     var v=parseInt($('speedSelect').value)||450;
     action('/set_speed',{delay_us:v});

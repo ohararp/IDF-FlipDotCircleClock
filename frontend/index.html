@@ -1,0 +1,360 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FlipDotCircleClock</title>
+  <style>
+    :root {
+      --bg: #050608;
+      --panel: #14171d;
+      --panel2: #1a1f27;
+      --border: rgba(255,255,255,0.22);
+      --text: #ffffff;
+      --shadow: 0 16px 40px rgba(0,0,0,0.75);
+      --radius: 16px;
+      --focus: 0 0 0 3px rgba(255,255,255,0.25);
+      --ok: #2ecc71;
+      --warn: #f1c40f;
+      --fail: #e74c3c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: radial-gradient(1200px 700px at 15% 0%, rgba(255,255,255,0.05), transparent 60%),
+        radial-gradient(900px 600px at 85% 20%, rgba(255,255,255,0.03), transparent 55%), var(--bg);
+      color: var(--text);
+    }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 22px 18px 40px 18px; }
+    .topbar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:16px; flex-wrap:wrap; }
+    .brand { display:flex; align-items:center; gap:12px; }
+    h1 { margin:0; font-size:18px; font-weight:700; }
+    .subtitle { margin-top:2px; font-size:12px; opacity:0.8; }
+    .pillrow { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .pill { display:inline-flex; gap:8px; align-items:center; padding:8px 12px; border-radius:999px; background:rgba(255,255,255,0.06); border:1px solid var(--border); font-size:12px; }
+    .dot { width:8px; height:8px; border-radius:999px; background:var(--warn); box-shadow:0 0 0 4px rgba(241,196,15,0.25); }
+    .dot.ok { background:var(--ok); box-shadow:0 0 0 4px rgba(46,204,113,0.25); }
+    .dot.bad { background:var(--fail); box-shadow:0 0 0 4px rgba(231,76,60,0.25); }
+    .card { background:linear-gradient(180deg,var(--panel2),var(--panel)); border:1px solid var(--border); border-radius:var(--radius); box-shadow:var(--shadow); padding:14px; margin-bottom:14px; }
+    .twocol { display:grid; grid-template-columns:1fr 1fr; gap:14px; align-items:start; }
+    @media (max-width:900px) { .twocol{grid-template-columns:1fr;} }
+    .section h2 { margin:0 0 10px 0; font-size:13px; letter-spacing:0.6px; text-transform:uppercase; opacity:0.95; }
+    .kv { display:grid; grid-template-columns:140px 1fr; gap:8px 10px; align-items:center; }
+    @media (max-width:520px) { .kv{grid-template-columns:1fr;} }
+    .k { font-size:12px; opacity:0.85; }
+    .v { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12px; padding:8px 10px; border-radius:12px; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.25); overflow-wrap:anywhere; }
+    .actions { display:flex; flex-wrap:wrap; gap:10px; margin-top:10px; align-items:center; }
+    button { border-radius:12px; border:1px solid rgba(255,255,255,0.35); background:rgba(255,255,255,0.10); color:#fff; padding:10px 12px; font-size:13px; outline:none; cursor:pointer; transition:transform 0.04s ease,background 0.15s ease; }
+    button:hover { background:rgba(255,255,255,0.16); }
+    button:active { transform:translateY(1px); }
+    button.primary { background:linear-gradient(180deg,rgba(255,255,255,0.22),rgba(255,255,255,0.12)); border-color:rgba(255,255,255,0.45); }
+    button:focus { box-shadow:var(--focus); }
+    button.danger { border-color:rgba(231,76,60,0.5); background:rgba(231,76,60,0.15); }
+    button.danger:hover { background:rgba(231,76,60,0.25); }
+    select { padding:8px 10px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.25); border-radius:8px; color:#fff; font-size:12px; cursor:pointer; }
+    select:focus { outline:none; box-shadow:var(--focus); }
+    select option { background:#1a1f27; }
+    .log { margin-top:8px; height:200px; overflow:auto; white-space:pre-wrap; border-radius:var(--radius); border:1px solid rgba(255,255,255,0.25); background:rgba(0,0,0,0.45); padding:12px; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12px; line-height:1.4; }
+    .linkpill { display:inline-block; padding:6px 10px; border-radius:999px; border:1px solid rgba(255,255,255,0.30); background:rgba(255,255,255,0.06); text-decoration:none; color:#fff; font-family:monospace; font-size:11px; }
+    .linkpill:hover { background:rgba(255,255,255,0.12); }
+    .tag { display:inline-block; padding:4px 8px; border-radius:6px; font-size:11px; font-weight:600; }
+    .tag.green { background:rgba(46,204,113,0.2); color:var(--ok); }
+    .tag.yellow { background:rgba(241,196,15,0.2); color:var(--warn); }
+    .tag.red { background:rgba(231,76,60,0.2); color:var(--fail); }
+    input[type=file] { font-size:12px; color:#fff; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <!-- Top bar: brand + status pills -->
+    <div class="topbar">
+      <div class="brand">
+        <div>
+          <h1>FlipDotCircleClock</h1>
+          <div class="subtitle">ESP-IDF 6.0 · FeatherS3</div>
+        </div>
+      </div>
+      <div class="pillrow">
+        <div class="pill"><span class="dot" id="dotWifi"></span>WiFi</div>
+        <div class="pill"><span class="dot" id="dotNtp"></span>NTP</div>
+        <div class="pill" id="pillTime">--:--:--</div>
+      </div>
+    </div>
+
+    <!-- Main card: two columns -->
+    <div class="card">
+      <div class="twocol">
+        <!-- Left: Clock Status -->
+        <div class="section">
+          <h2>Clock Status</h2>
+          <div class="kv">
+            <div class="k">Time</div><div class="v" id="time">--:--:--</div>
+            <div class="k">Date</div><div class="v" id="date">----/--/--</div>
+            <div class="k">Hour (12h)</div><div class="v" id="hour12">--</div>
+            <div class="k">Timezone</div><div class="v" id="timezone">--</div>
+            <div class="k">Change TZ</div><div class="v" style="padding:4px;"><select id="tzSelect"><option value="">Loading...</option></select></div>
+            <div class="k">IP Address</div><div class="v" id="ip">--</div>
+            <div class="k">RSSI</div><div class="v" id="rssi">-- dBm</div>
+            <div class="k">Uptime</div><div class="v" id="uptime">--</div>
+            <div class="k">Free Heap</div><div class="v" id="heap">--</div>
+            <div class="k">Firmware</div><div class="v" id="firmware">--</div>
+          </div>
+        </div>
+
+        <!-- Right: Controls -->
+        <div class="section">
+          <h2>Controls</h2>
+          <div class="actions">
+            <button class="primary" id="btnNtpSync">Sync NTP</button>
+            <button id="btnHourPlus">+1 Hour</button>
+            <button id="btnMinPlus">+1 Minute</button>
+          </div>
+          <div class="actions">
+            <button id="btnHome">Home</button>
+            <button id="btnWipe">Wipe Display</button>
+            <button id="btnRefresh">Refresh Hour</button>
+          </div>
+          <div class="actions">
+            <button id="btnAnimSync">Sync Animation</button>
+          </div>
+
+          <h2 style="margin-top:14px;">Motor</h2>
+          <div class="kv">
+            <div class="k">Position</div><div class="v" id="motorPos">--</div>
+            <div class="k">AS5600 Angle</div><div class="v" id="as5600">--</div>
+          </div>
+          <div class="actions">
+            <span style="font-size:12px;opacity:0.8;">Speed:</span>
+            <select id="speedSelect" style="width:100px;">
+              <script>
+                for(var i=100;i<=1000;i+=25){
+                  document.write('<option value="'+i+'"'+(i===450?' selected':'')+'>'+i+' μs</option>');
+                }
+              </script>
+            </select>
+            <button id="btnSetSpeed">Set</button>
+            <span style="font-size:12px;opacity:0.8;">Current: <span id="currentSpeed">450</span> μs</span>
+          </div>
+          <div class="actions">
+            <button id="btnStepperEn">Enable Motor</button>
+            <button id="btnStepperDis">Disable Motor</button>
+          </div>
+
+          <h2 style="margin-top:14px;">Calibration</h2>
+          <div class="actions" id="calNormal">
+            <button id="btnCalStart">Calibrate AS5600</button>
+            <span style="font-size:12px;opacity:0.8;margin-left:8px;" id="calStatus"></span>
+          </div>
+          <div class="actions" id="calActive" style="display:none;">
+            <span style="font-size:12px;opacity:0.9;">Move hand to 12:00:</span>
+            <button id="btnCalSave" class="primary">Save</button>
+            <button id="btnCalCancel">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- OTA Update card -->
+    <div class="card">
+      <div class="section">
+        <h2>Firmware Update</h2>
+        <div class="kv">
+          <div class="k">Current Version</div><div class="v" id="otaCurrentVer">--</div>
+          <div class="k">Latest Available</div><div class="v" id="otaLatestVer">--</div>
+        </div>
+        <div class="actions">
+          <button id="btnOtaCheck">Check for Update</button>
+          <button id="btnOtaUpdate" class="primary" style="display:none;">Update Now</button>
+        </div>
+        <div class="actions" style="margin-top:10px;">
+          <span style="font-size:12px;opacity:0.8;">Or upload .bin:</span>
+          <input type="file" id="otaFile" accept=".bin">
+          <button id="btnOtaUpload">Upload</button>
+        </div>
+        <div style="margin-top:8px;font-size:12px;opacity:0.8;" id="otaStatus"></div>
+      </div>
+    </div>
+
+    <!-- Action Log card -->
+    <div class="card">
+      <div class="section">
+        <h2>Action Log</h2>
+        <div class="log" id="log">Loading...</div>
+        <div style="margin-top:8px;">
+          API: <a class="linkpill" href="/status.json">/status.json</a>
+          <a class="linkpill" style="margin-left:6px;" href="/log.json">/log.json</a>
+          <a class="linkpill" style="margin-left:6px;" href="/log.json?persistent=true">/log (persistent)</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function(){
+  // Helpers
+  function $(id){return document.getElementById(id);}
+  function text(id,val){var el=$(id);if(el)el.textContent=(val!=null?String(val):'--');}
+  function dot(id,ok){var el=$(id);if(el)el.className='dot '+(ok?'ok':'bad');}
+  function post(url,body){
+    var opts={method:'POST'};
+    if(body){opts.headers={'Content-Type':'application/json'};opts.body=JSON.stringify(body);}
+    return fetch(url,opts).then(function(r){return r.json();});
+  }
+
+  // Status polling (every 1s)
+  function refreshStatus(){
+    fetch('/status.json',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
+      text('pillTime',d.time);
+      text('time',d.time);
+      text('date',d.date);
+      text('hour12',d.hour_12);
+      text('timezone',d.timezone_name);
+      text('ip',d.ip);
+      text('rssi',d.rssi+' dBm');
+      text('uptime',d.uptime_s+'s');
+      text('heap',d.free_heap+' bytes');
+      text('firmware',d.version);
+      text('motorPos',d.motor_pos);
+      text('as5600',d.as5600_angle);
+      text('otaCurrentVer',d.version);
+      dot('dotWifi',d.wifi_connected);
+      dot('dotNtp',d.ntp_synced);
+      if(d.step_delay_us){
+        text('currentSpeed',d.step_delay_us);
+        var sel=$('speedSelect');
+        if(sel)sel.value=String(d.step_delay_us);
+      }
+    }).catch(function(){
+      dot('dotWifi',false);
+      dot('dotNtp',false);
+    });
+  }
+
+  // Log polling (every 5s)
+  function refreshLog(){
+    fetch('/log.json',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
+      var el=$('log');
+      if(!el||!d.entries||!d.entries.length){if(el)el.textContent='No entries.';return;}
+      el.textContent=d.entries.map(function(e){return e.ts+'  '+e.msg;}).join('\n');
+      el.scrollTop=el.scrollHeight;
+    }).catch(function(){});
+  }
+
+  // Timezone loader
+  function loadTimezones(){
+    fetch('/get_timezone',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
+      var sel=$('tzSelect');
+      if(!sel)return;
+      sel.innerHTML='';
+      var regions={'US':'United States','EU':'Europe','AS':'Asia','OC':'Oceania','':'Other'};
+      var groups={};
+      d.timezones.forEach(function(tz){
+        var region=tz.key.split('/')[0];
+        if(!groups[region])groups[region]=[];
+        groups[region].push(tz);
+      });
+      Object.keys(regions).forEach(function(rk){
+        var tzList=groups[rk]||(rk===''?groups['UTC']:[]);
+        if(!tzList||!tzList.length)return;
+        var og=document.createElement('optgroup');
+        og.label=regions[rk];
+        tzList.forEach(function(tz){
+          var opt=document.createElement('option');
+          opt.value=tz.key;
+          var hrs=tz.offset/60;
+          opt.textContent=tz.name+' (UTC'+(hrs>=0?'+':'')+hrs+')'+(tz.dst?' *':'');
+          if(tz.key===d.current)opt.selected=true;
+          og.appendChild(opt);
+        });
+        sel.appendChild(og);
+      });
+    }).catch(function(){});
+  }
+
+  // Button handlers
+  function action(url,body){post(url,body).then(function(){setTimeout(refreshLog,500);}).catch(function(){});}
+
+  $('btnNtpSync').onclick=function(){action('/sync_ntp');};
+  $('btnHourPlus').onclick=function(){action('/set_hour');};
+  $('btnMinPlus').onclick=function(){action('/set_min');};
+  $('btnHome').onclick=function(){action('/home');};
+  $('btnWipe').onclick=function(){action('/wipe');};
+  $('btnRefresh').onclick=function(){action('/refresh');};
+  $('btnAnimSync').onclick=function(){action('/anim/sync');};
+  $('btnStepperEn').onclick=function(){action('/stepper_enable');};
+  $('btnStepperDis').onclick=function(){action('/stepper_disable');};
+  $('btnSetSpeed').onclick=function(){
+    var v=parseInt($('speedSelect').value)||450;
+    action('/set_speed',{delay_us:v});
+  };
+  $('tzSelect').onchange=function(){if(this.value)action('/set_timezone',{timezone:this.value});};
+
+  // Calibration
+  $('btnCalStart').onclick=function(){
+    post('/cal_start').then(function(d){
+      if(d.ok){$('calNormal').style.display='none';$('calActive').style.display='flex';}
+      setTimeout(refreshLog,500);
+    }).catch(function(){});
+  };
+  $('btnCalSave').onclick=function(){
+    post('/cal_save').then(function(d){
+      $('calNormal').style.display='flex';$('calActive').style.display='none';
+      text('calStatus',d.ok?'Saved! AS5600='+d.angle:'Error');
+      setTimeout(refreshLog,500);
+    }).catch(function(){});
+  };
+  $('btnCalCancel').onclick=function(){
+    post('/cal_cancel').then(function(){
+      $('calNormal').style.display='flex';$('calActive').style.display='none';
+      text('calStatus','Cancelled');
+      setTimeout(refreshLog,500);
+    }).catch(function(){});
+  };
+
+  // OTA
+  $('btnOtaCheck').onclick=function(){
+    text('otaStatus','Checking...');
+    post('/ota/check').then(function(d){
+      text('otaLatestVer',d.latest_version||'--');
+      if(d.update_available){
+        $('btnOtaUpdate').style.display='inline-block';
+        text('otaStatus','Update available!');
+      }else{
+        $('btnOtaUpdate').style.display='none';
+        text('otaStatus','Up to date.');
+      }
+    }).catch(function(){text('otaStatus','Check failed');});
+  };
+  $('btnOtaUpdate').onclick=function(){
+    if(!confirm('Download and install firmware update? Device will reboot.'))return;
+    text('otaStatus','Downloading...');
+    post('/ota/update').then(function(d){
+      text('otaStatus',d.ok?'Update complete, rebooting...':'Update failed: '+(d.error||'unknown'));
+    }).catch(function(){text('otaStatus','Update failed');});
+  };
+  $('btnOtaUpload').onclick=function(){
+    var file=$('otaFile').files[0];
+    if(!file){alert('Select a .bin file first');return;}
+    if(!confirm('Upload and flash '+file.name+'? Device will reboot.'))return;
+    text('otaStatus','Uploading '+file.name+'...');
+    var xhr=new XMLHttpRequest();
+    xhr.open('POST','/ota/upload');
+    xhr.onload=function(){
+      var d=JSON.parse(xhr.responseText);
+      text('otaStatus',d.ok?'Upload complete, rebooting...':'Upload failed: '+(d.error||'unknown'));
+    };
+    xhr.onerror=function(){text('otaStatus','Upload failed');};
+    xhr.send(file);
+  };
+
+  // Init
+  refreshStatus();
+  refreshLog();
+  loadTimezones();
+  setInterval(refreshStatus,1000);
+  setInterval(refreshLog,5000);
+})();
+</script>
+</body>
+</html>

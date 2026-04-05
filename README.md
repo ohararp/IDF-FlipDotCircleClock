@@ -7,9 +7,10 @@ ESP-IDF 6.0 (C/FreeRTOS) port of the [FlipDotCircleClock](https://github.com/oha
 - **MCU:** Unexpected Maker FeatherS3 (ESP32-S3, 240 MHz dual-core, 16 MB flash)
 - **Hour display:** 3-column x 4-row flip-dot matrix (12 dots, 24V relay-switched, SPI-controlled)
 - **Minute hand:** TMC2209 stepper driver, 0.9deg/step motor, 32x microstepping (12,800 steps/rev)
-- **Homing:** A3144 Hall effect sensor
-- **Peripherals:** DS3231 RTC (I2C), SH1107 128x64 OLED (I2C), AS5600 magnetic encoder (I2C, optional)
-- **Interface:** WiFi + NTP, HTTP web server, 3 buttons, NeoPixel status LED
+- **Positioning:** AS5600 magnetic encoder for PID closed-loop control (±0.09° accuracy)
+- **Peripherals:** DS3231 RTC (I2C), SH1107 128x64 OLED (I2C), AS5600 magnetic encoder (I2C)
+- **Connectivity:** WiFi + BLE provisioning (ESP BLE Prov app + QR code), NTP time sync, mDNS (flipclock.local)
+- **Interface:** 3 buttons (short+long press), NeoPixel status LED (1Hz blink)
 
 ## Building
 

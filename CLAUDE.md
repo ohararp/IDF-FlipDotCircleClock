@@ -96,7 +96,7 @@ FlipDotCircleClock/
 │   ├── buttons.c / .h          # espressif/button component wrapper (A/B/C short+long press)
 │   ├── calibration.c / .h      # AS5600 calibration enter/save/cancel with 3s cooldown
 │   ├── animations.c / .h       # (Step 10) Demo, chaos, sync sequences
-│   ├── network.c / .h          # (Step 12) WiFi connect/recover/health
+│   ├── network.c / .h          # WiFi STA + BLE provisioning + NTP sync + mDNS
 │   ├── web_server.c / .h       # (Step 13) HTTP server + JSON API
 │   └── ota_update.c / .h       # (Step 13) GitHub release OTA updates
 ├── partitions.csv              # (Step 13) Custom partition table
@@ -318,37 +318,43 @@ FlipDotCircleClock/
 
 ---
 
-## Step 12: WiFi + NTP Synchronization
+## Step 12: WiFi + BLE Provisioning + NTP Sync ✅
 
-**Goal:** WiFi connection management and NTP time sync.
+**Implemented:**
+- `network.c/.h` — WiFi STA + BLE provisioning + NTP:
+  - `network_init()` — init WiFi stack, check NVS for provisioning request flag or stored credentials:
+    - Provisioning requested (Button A long → reboot): erase old creds, start BLE provisioning with QR on OLED
+    - Credentials stored: connect WiFi in background (non-blocking), start NTP wait task
+    - No credentials, no request: skip WiFi, show "No WiFi — hold A to setup"
+  - `network_start_provisioning()` — start BLE provisioning via `espressif/network_provisioning` component
+    - Device name: "FlipClk_XXXX" (MAC-based), proof-of-possession: "flipdot"
+    - QR code displayed on OLED via `espressif/qrcode` component for ESP BLE Prov app scanning
+    - Security 1 (Curve25519 + AES256-CTR)
+  - `network_get_state()` — PROVISIONING / CONNECTING / CONNECTED / DISCONNECTED / OFFLINE
+  - `network_get_ip_str()`, `network_get_rssi()`, `network_ntp_synced()`
+  - `network_reset_provisioning()` — sets NVS prov request flag, reboots
+  - `network_stop_provisioning()` — cleanly stop BLE and free resources
+  - NTP via `esp_sntp`: sync on WiFi connect, hourly re-sync timer, writes UTC to RTC
+  - mDNS: `flipclock.local` registered after WiFi connects
+- `oled_display.c` — `oled_show_qr()`: QR code rendered on left 64px with label text on right (POP, cancel instructions)
+- `timekeeping.c` — dual-mode RTC:
+  - Before NTP sync: RTC stores local time (compile timestamp), read directly
+  - After NTP sync: RTC stores UTC, `timekeeping_get_local_time()` applies timezone + DST offset
+  - `timekeeping_mark_ntp_synced()` flag switches between modes
+- **Boot UX:** clock always starts immediately. WiFi is optional and on-demand:
+  - Button A long: sets NVS flag → reboots → BLE provisioning starts with QR on OLED
+  - Button C (raw GPIO poll): cancel provisioning during BLE mode, resume clock
+  - After provisioning: reboots to connect WiFi + sync NTP
+- NeoPixel 1Hz blink: green=WiFi+NTP, cyan=WiFi OK NTP pending, yellow=offline, purple=provisioning
+- Custom `partitions.csv`: 3MB app partition (BLE+WiFi firmware >1MB)
+- `sdkconfig.defaults`: BLE NimBLE enabled, Security 1 protocomm
+- Default timezone: US/Eastern (index 6)
+- I2C retry logic (3 attempts, 500ms timeout) for BLE/I2C coexistence
+- Long press threshold: 1 second (was 2s)
 
-**Implement:**
-- `network.c/.h`:
-  - `network_init()` — init WiFi STA mode, register event handlers
-  - `network_connect(const char *ssid, const char *password)` — connect with retry
-  - `network_get_state()` — CONNECTED / CONNECTING / DISCONNECTED / OFFLINE
-  - `network_recover()` — exponential backoff (1s→2s→4s→8s), 3 failures → OFFLINE
-  - `network_health_check()` — periodic WiFi status validation
-  - `network_get_rssi()` / `network_get_ip_str()`
-  - mDNS: register hostname (e.g. `flipclock.local`) via `mdns` component
-  - NTP sync via `esp_sntp`:
-    - `network_sync_ntp()` — trigger SNTP, update RTC on callback
-    - Hourly re-sync via esp_timer
-- WiFi credentials: hardcoded via Kconfig (`menuconfig`) for development
-  - `CONFIG_WIFI_SSID` and `CONFIG_WIFI_PASSWORD` in `Kconfig.projbuild`
-  - **TODO (future):** SoftAP captive portal provisioning + optional `settings.toml` on SPIFFS
-- Wire `timekeeping_sync_from_ntp()` to SNTP callback
-- Button A long press: trigger `network_recover()` for manual WiFi reconnect
-- NeoPixel colors updated:
-  - Purple: WiFi connecting
-  - Green: WiFi + NTP synced
-  - Yellow: WiFi connection failed
-  - Cyan: WiFi OK, NTP failed
-- Pin WiFi/NTP tasks to Core 0, keep motor/flipdot on Core 1
+**Dependencies:** `espressif/network_provisioning: "^1.2.2"`, `espressif/mdns: "^1.4.0"`, `espressif/qrcode: "^0.2.0"`
 
-**ESP-IDF APIs:** `esp_wifi`, `esp_event`, `esp_netif`, `esp_sntp`, `mdns`, `nvs`
-
-**Verify:** Connects to WiFi, gets IP. `flipclock.local` resolves. NTP syncs RTC. Recovery works after disconnect. OFFLINE mode after 3 failures. Clock continues running on RTC when WiFi is down.
+**Known limitation:** BLE provisioning can only start on a clean boot (Button A long triggers reboot). Cannot start BLE after WiFi stack is initialized — BLE memory is released after prov manager deinit.
 
 ---
 

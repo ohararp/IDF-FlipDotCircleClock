@@ -225,6 +225,7 @@ void clock_update_minute(const struct tm *local)
             stepper_move_to_angle(target_raw, 1); // ±1 AS5600 unit ≈ ±0.09°
             stepper_set_position((minute * STEPPER_STEPS_PER_REV) / 60);
             ESP_LOGI(TAG, "Minute update (PID): %02d → AS5600 tgt %d", minute, target_raw);
+            { char buf[32]; snprintf(buf, sizeof(buf), "Min hand → :%02d (PID)", minute); action_log_add(buf); }
             return;
         }
     }

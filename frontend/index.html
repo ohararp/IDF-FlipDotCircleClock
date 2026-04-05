@@ -238,7 +238,7 @@
       var el=$('log');
       if(!el||!d.entries||!d.entries.length){if(el)el.textContent='No entries.';return;}
       el.textContent=d.entries.map(function(e){return e.ts+'  '+e.msg;}).join('\n');
-      el.scrollTop=el.scrollHeight;
+      el.scrollTop=0; // newest entries are at top
     }).catch(function(){});
   }
 

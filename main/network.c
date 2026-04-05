@@ -83,6 +83,7 @@ static void event_handler(void *arg, esp_event_base_t event_base,
             } else {
                 s_state = NETWORK_OFFLINE;
                 ESP_LOGW(TAG, "WiFi offline after %d retries — periodic reconnect every 5 min", MAX_RETRIES);
+                action_log_add("WiFi offline (retries exhausted)");
                 xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
                 // Start periodic reconnect timer (every 60s)
                 start_reconnect_timer();
@@ -117,6 +118,7 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         switch (event_id) {
         case NETWORK_PROV_START:
             ESP_LOGI(TAG, "Provisioning started — use ESP BLE Prov app");
+            action_log_add("BLE provisioning started");
             oled_terminal_print("BLE Prov started");
             oled_terminal_print("Use ESP BLE Prov app");
             s_state = NETWORK_PROVISIONING;
@@ -129,6 +131,7 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         }
         case NETWORK_PROV_WIFI_CRED_SUCCESS:
             ESP_LOGI(TAG, "Prov: credentials applied successfully");
+            action_log_add("WiFi credentials received");
             oled_terminal_print("Prov: success!");
             // Only change state if still in provisioning — don't overwrite CONNECTED
             if (s_state == NETWORK_PROVISIONING) {
@@ -137,6 +140,7 @@ static void event_handler(void *arg, esp_event_base_t event_base,
             break;
         case NETWORK_PROV_WIFI_CRED_FAIL:
             ESP_LOGW(TAG, "Prov: credentials failed");
+            action_log_add("WiFi credentials failed");
             oled_terminal_print("Prov: failed!");
             break;
         case NETWORK_PROV_END:
@@ -210,6 +214,7 @@ static void reconnect_timer_cb(void *arg)
 {
     if (s_state == NETWORK_OFFLINE) {
         ESP_LOGI(TAG, "Periodic reconnect attempt...");
+        action_log_add("WiFi auto-reconnect attempt");
         s_retry_count = 0; // reset retry counter for fresh attempt
         s_state = NETWORK_CONNECTING;
         esp_wifi_connect();
@@ -414,6 +419,7 @@ void network_recover(void)
         return;
     }
     ESP_LOGI(TAG, "Manual WiFi reconnect");
+    action_log_add("WiFi manual reconnect");
     oled_terminal_print("WiFi: reconnecting...");
     stop_reconnect_timer(); // stop periodic timer, we're trying manually
     s_retry_count = 0;

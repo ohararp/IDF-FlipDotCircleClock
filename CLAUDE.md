@@ -366,38 +366,46 @@ FlipDotCircleClock/
 
 ---
 
-## Step 13: HTTP Web Server + JSON API + OTA + Persistent Logging
+## Step 13: HTTP Web Server + JSON API + Action Log ✅ (OTA pending)
 
-**Goal:** Full web control interface, OTA firmware updates, and persistent action logging. Implemented in 4 sub-phases (frontend-first approach).
+**Implemented:**
 
-### Phase A: Frontend (index.html) — Fresh Design, CP-Inspired
-- `frontend/index.html` — single-page dark-themed responsive web app
-- Sections: header + WiFi pill, status card, controls card, calibration card, motor card, OTA card, action log
-- Polling: status every 1s, log every 5s
-- All controls use POST with JSON bodies
-- Test in browser with mock data before embedding
+### Phase A: Frontend ✅
+- `frontend/index.html` — dark-themed responsive single-page web app (CP-inspired, fresh design)
+  - Header: "FlipDotCircleClock" title + WiFi/NTP status dots + live time pill
+  - Status card: time, date, hour (12h), timezone dropdown, IP, RSSI, uptime, RAM usage, flash usage, firmware version
+  - Controls: +1 Hour, +1 Min, Home (5s hold), Refresh Time, Sync Animation, NTP Sync
+  - Motor: position, AS5600 angle, speed dropdown (auto-applies on change, 100-1000µs)
+  - Calibration: Start/Save/Cancel with live AS5600 angle display
+  - OTA card: check for update, upload .bin (endpoints stubbed, Phase D pending)
+  - Action log: scrollable monospace log, newest first, auto-refresh every 5s
+  - Polling: status every 1s, log every 5s
+  - Responsive: two-column desktop, single-column mobile
 
-### Phase B: Web Server + JSON API
-- `web_server.c/.h` — `esp_http_server` + `cJSON`
-- Embed `index.html` via `EMBED_FILES`
+### Phase B: Web Server + JSON API ✅
+- `web_server.c/.h` — `esp_http_server` + `cJSON`, embedded `index.html` via `EMBED_FILES`
+- `web_commands.h` — command queue types for cross-core API (web server Core 0 → main loop)
 - GET endpoints: `/`, `/status.json`, `/get_timezone`, `/get_speed`, `/log.json`
-- POST endpoints: `/set_hour`, `/set_min`, `/home`, `/refresh`, `/set_timezone`, `/set_speed`, `/anim/sync`, `/cal_start`, `/cal_save`, `/cal_cancel`, `/wipe`, `/stepper_enable`, `/stepper_disable`
-- Web handlers → FreeRTOS command queue → clock task (Core 0 → Core 1 cross-core safety)
+- POST endpoints: `/set_hour`, `/set_min`, `/home`, `/wipe` (refresh time), `/set_timezone`, `/set_speed`, `/anim/sync`, `/sync_ntp`, `/cal_start`, `/cal_save`, `/cal_cancel`
+- Cached time + AS5600 angle from display task (no I2C reads in web handler — prevents bus contention)
+- OLED I2C: 50ms timeout, no retry (fail fast if bus busy with AS5600)
+- All OLED functions guard against uninitialized U8G2 (prevents crash if I2C bus fails)
 
-### Phase C: Action Log (RAM + LittleFS)
-- `action_log.c/.h` — 128-entry RAM ring buffer + 64KB LittleFS persistent log
-- Timestamped entries, file rotation at size limit
-- `/log.json` serves RAM buffer, `/log.json?persistent=true` serves LittleFS
-- Wire into stepper, flipdot, button, network events
-- Add `espressif/esp_littlefs` component + littlefs partition
+### Phase C: Action Log (RAM-only) ✅
+- `action_log.c/.h` — 128-entry RAM ring buffer with mutex protection
+- Timestamped entries (HH:MM:SS), newest first in JSON output
+- Wired into all key events: button presses, web commands, motor homing, PID convergence/failure, WiFi connect/disconnect/offline, NTP sync, BLE provisioning, flipdot updates, minute/hour changes, calibration, animations
+- `/log.json` serves RAM buffer, `/log.json?persistent=true` returns empty (LittleFS pending)
+- LittleFS persistent logging planned but disabled (component dependency issue — TODO)
 
-### Phase D: OTA Updates (GitHub + Web Upload)
-- `ota_update.c/.h` — check GitHub Releases API + `esp_https_ota` download + web .bin upload
-- Endpoints: `/ota/check`, `/ota/update`, `/ota/upload`
-- Auto-rollback on 3 boot failures, OLED progress display
-- Add OTA partitions (ota_0 + ota_1) to `partitions.csv`
-- Bundle GitHub CA cert via `esp_crt_bundle`
+### Phase D: OTA Updates — NOT YET IMPLEMENTED
+- Frontend has UI (check/upload buttons) but no backend endpoints
+- TODO: `ota_update.c/.h`, GitHub Releases API, `esp_https_ota`, web upload handler
+- TODO: OTA partitions in `partitions.csv`
 
-**ESP-IDF APIs:** `esp_http_server`, `cJSON`, `esp_https_ota`, `esp_ota_ops`, `esp_crt_bundle`, `espressif/esp_littlefs`
+**ESP-IDF APIs:** `esp_http_server`, `cJSON`
 
-**Verify:** Web UI at `flipclock.local`, all controls functional, OTA from GitHub + upload, persistent log survives reboot, 24+ hour soak test.
+**Known issues:**
+- PSRAM not enabled (FeatherS3 SPIRAM mode causes boot hang — needs investigation)
+- LittleFS persistent log disabled (component dependency issue)
+- OTA not implemented

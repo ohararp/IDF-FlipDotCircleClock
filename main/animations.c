@@ -3,6 +3,7 @@
 // Caller must suspend display task and acquire hardware mutex before calling.
 
 #include "animations.h"
+#include "action_log.h"
 #include "stepper.h"
 #include "as5600.h"
 #include "calibration.h"
@@ -46,6 +47,7 @@ static void restore_time(void)
 void anim_sync(void)
 {
     ESP_LOGI(TAG, "Sync animation starting");
+    action_log_add("Sync animation started");
     oled_terminal_print("Anim: Sync");
 
     // Blank display and home minute hand
@@ -81,4 +83,5 @@ void anim_sync(void)
     oled_terminal_print("Sync: restoring...");
     restore_time();
     ESP_LOGI(TAG, "Sync animation complete");
+    action_log_add("Sync animation complete");
 }

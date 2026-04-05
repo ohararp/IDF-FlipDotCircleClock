@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include "calibration.h"
+#include "action_log.h"
 #include "as5600.h"
 #include "stepper.h"
 #include "nvm_storage.h"
@@ -72,6 +73,7 @@ esp_err_t calibration_save(void)
     char buf[26];
     snprintf(buf, sizeof(buf), "CAL: saved %d", angle);
     oled_terminal_print(buf);
+    { char buf[40]; snprintf(buf, sizeof(buf), "Cal saved: AS5600=%d", angle); action_log_add(buf); }
     ESP_LOGI(TAG, "Calibration saved: AS5600 angle %d (%.1f deg) = 12 o'clock",
              angle, as5600_to_degrees(angle));
 

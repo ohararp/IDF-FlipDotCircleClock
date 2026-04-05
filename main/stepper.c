@@ -263,6 +263,7 @@ bool stepper_move_to_angle(uint16_t target_raw, int tolerance)
         if (actual_err <= tolerance) {
             s_step_now = as5600_to_steps(current);
             ESP_LOGI(TAG, "PID converged: cur=%d err=%d iter=%d", current, cw_dist, iter);
+            { char buf[40]; snprintf(buf, sizeof(buf), "PID → %d (err=%d, %d iter)", current, actual_err, iter); action_log_add(buf); }
             converged = true;
             break;
         }
@@ -309,6 +310,7 @@ bool stepper_move_to_angle(uint16_t target_raw, int tolerance)
     if (!converged) {
         as5600_read_raw_angle(&current);
         ESP_LOGW(TAG, "PID failed: cur=%d tgt=%d after %d iters", current, target_raw, max_iterations);
+        action_log_add("PID move failed");
     }
 
     return converged;

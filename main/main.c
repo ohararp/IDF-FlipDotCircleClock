@@ -17,6 +17,7 @@
 #include "flipdot.h"
 #include "animations.h"
 #include "gpio_config.h"
+#include "driver/gpio.h"
 #include "timekeeping.h"
 #include "network.h"
 
@@ -156,26 +157,41 @@ static void setup(void)
     network_init();
 
     // If BLE provisioning is active, hold here with QR on OLED until done or C to skip
+    // Uses raw GPIO polling for Button C — espressif/button timer may not work during BLE
     if (network_is_provisioning()) {
         ESP_LOGI(TAG, "BLE provisioning active — press C to skip");
-        // Init buttons early so C press works during provisioning
-        if (!s_buttons_inited) { ESP_ERROR_CHECK(buttons_init()); s_buttons_inited = true; }
-        app_button_event_t prov_evt;
+        // Configure Button C GPIO as input with pull-up for raw polling
+        gpio_config_t btn_c_cfg = {
+            .pin_bit_mask = (1ULL << PIN_BUTTON_C),
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_ENABLE,
+        };
+        gpio_config(&btn_c_cfg);
+
         while (network_is_provisioning()) {
-            if (!network_is_provisioning()) {
-                ESP_LOGI(TAG, "Provisioning complete — rebooting to apply");
-                oled_terminal_print("Rebooting...");
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                esp_restart();
-            }
-            if (buttons_get_event(&prov_evt, 500)) {
-                if (prov_evt == BUTTON_EVENT_C_SHORT) {
-                    ESP_LOGI(TAG, "Provisioning skipped by Button C");
+            // Raw GPIO poll: Button C is active LOW (pressed = 0)
+            if (gpio_get_level(PIN_BUTTON_C) == 0) {
+                // Debounce: wait 50ms and check again
+                vTaskDelay(pdMS_TO_TICKS(50));
+                if (gpio_get_level(PIN_BUTTON_C) == 0) {
+                    ESP_LOGI(TAG, "Provisioning skipped by Button C (GPIO poll)");
                     oled_terminal_print("WiFi: skipped");
                     network_stop_provisioning();
+                    // Wait for button release
+                    while (gpio_get_level(PIN_BUTTON_C) == 0) {
+                        vTaskDelay(pdMS_TO_TICKS(50));
+                    }
                     break;
                 }
             }
+            vTaskDelay(pdMS_TO_TICKS(100)); // poll every 100ms
+        }
+        // Check if provisioning completed (not cancelled)
+        if (!network_is_provisioning() && network_get_state() == NETWORK_CONNECTING) {
+            ESP_LOGI(TAG, "Provisioning complete — rebooting to apply");
+            oled_terminal_print("Rebooting...");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            esp_restart();
         }
     }
 

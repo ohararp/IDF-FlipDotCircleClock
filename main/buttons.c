@@ -17,7 +17,7 @@ static const char *TAG = "buttons";
 static QueueHandle_t s_button_queue;
 
 // Long press threshold in milliseconds (fires while button is still held)
-#define LONG_PRESS_MS 2000
+#define LONG_PRESS_MS 1000
 
 // ── Callback helpers: each posts an event to the queue ───────────────────────
 

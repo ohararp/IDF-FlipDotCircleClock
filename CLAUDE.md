@@ -366,42 +366,38 @@ FlipDotCircleClock/
 
 ---
 
-## Step 13: HTTP Web Server + JSON API + OTA
+## Step 13: HTTP Web Server + JSON API + OTA + Persistent Logging
 
-**Goal:** Full web control interface and over-the-air firmware updates.
+**Goal:** Full web control interface, OTA firmware updates, and persistent action logging. Implemented in 4 sub-phases (frontend-first approach).
 
-**Implement:**
-- `web_server.c/.h`:
-  - `web_server_start()` — start `httpd` on port 80
-  - `web_server_stop()`
-  - URI handlers:
-    - `GET /` — serve index.html (embedded in flash)
-    - `GET /status.json` — time, timezone, IP, RSSI, uptime, free heap, motor pos
-    - `GET /get_timezone` — list of 18 timezones
-    - `GET /get_speed` — current step delay
-    - `GET /log.json` — recent action log
-    - `POST /set_hour` / `POST /set_min` — manual adjustments
-    - `POST /home` — trigger homing
-    - `POST /refresh` — force hour display update
-    - `POST /sync_wifi` — manual NTP sync
-    - `POST /set_timezone` — change timezone
-    - `POST /set_speed` — change step delay
-    - `POST /anim/demo` / `POST /anim/chaos` / `POST /anim/sync`
-    - `POST /cal_start` / `POST /cal_save` / `POST /cal_cancel`
-    - `POST /wipe` — blank flip-dots and home minute hand
-    - `POST /stepper_enable` / `POST /stepper_disable` — toggle motor EN pin
-    - `POST /ota/check` / `POST /ota/update` — OTA update endpoints
-  - Web API handlers post commands to FreeRTOS queue consumed by clock task (Core 0 → Core 1)
-- `ota_update.c/.h`:
-  - `ota_check_for_update()` — query GitHub Releases API for newest tag
-  - `ota_perform_update()` — download `.bin` via `esp_https_ota`
-  - `ota_rollback()` — reboot to previous partition
-  - Auto-rollback on 3 consecutive boot failures
-- Custom `partitions.csv` with OTA layout (factory + ota_0 + ota_1 + littlefs)
-- Action log: in-memory ring buffer (~32 entries) + persistent LittleFS log (64KB)
-- Embed `index.html` via `EMBED_FILES` in CMakeLists.txt
-- `cJSON` for JSON response building
+### Phase A: Frontend (index.html) — Fresh Design, CP-Inspired
+- `frontend/index.html` — single-page dark-themed responsive web app
+- Sections: header + WiFi pill, status card, controls card, calibration card, motor card, OTA card, action log
+- Polling: status every 1s, log every 5s
+- All controls use POST with JSON bodies
+- Test in browser with mock data before embedding
 
-**ESP-IDF APIs:** `esp_http_server`, `cJSON`, `esp_https_ota`, `esp_ota_ops`, `esp_crt_bundle`
+### Phase B: Web Server + JSON API
+- `web_server.c/.h` — `esp_http_server` + `cJSON`
+- Embed `index.html` via `EMBED_FILES`
+- GET endpoints: `/`, `/status.json`, `/get_timezone`, `/get_speed`, `/log.json`
+- POST endpoints: `/set_hour`, `/set_min`, `/home`, `/refresh`, `/set_timezone`, `/set_speed`, `/anim/sync`, `/cal_start`, `/cal_save`, `/cal_cancel`, `/wipe`, `/stepper_enable`, `/stepper_disable`
+- Web handlers → FreeRTOS command queue → clock task (Core 0 → Core 1 cross-core safety)
 
-**Verify:** Browser loads web UI. All endpoints functional. OTA updates from GitHub releases. Rollback works. 24+ hour soak test with WiFi + web server active.
+### Phase C: Action Log (RAM + LittleFS)
+- `action_log.c/.h` — 128-entry RAM ring buffer + 64KB LittleFS persistent log
+- Timestamped entries, file rotation at size limit
+- `/log.json` serves RAM buffer, `/log.json?persistent=true` serves LittleFS
+- Wire into stepper, flipdot, button, network events
+- Add `espressif/esp_littlefs` component + littlefs partition
+
+### Phase D: OTA Updates (GitHub + Web Upload)
+- `ota_update.c/.h` — check GitHub Releases API + `esp_https_ota` download + web .bin upload
+- Endpoints: `/ota/check`, `/ota/update`, `/ota/upload`
+- Auto-rollback on 3 boot failures, OLED progress display
+- Add OTA partitions (ota_0 + ota_1) to `partitions.csv`
+- Bundle GitHub CA cert via `esp_crt_bundle`
+
+**ESP-IDF APIs:** `esp_http_server`, `cJSON`, `esp_https_ota`, `esp_ota_ops`, `esp_crt_bundle`, `espressif/esp_littlefs`
+
+**Verify:** Web UI at `flipclock.local`, all controls functional, OTA from GitHub + upload, persistent log survives reboot, 24+ hour soak test.

@@ -1,7 +1,7 @@
 # FlipDotCircleClock: CircuitPython → ESP-IDF 6.0 Porting Plan
 
 ## Context
-The FlipDotCircleClock is a flip-dot circle clock currently running as a single ~103KB CircuitPython `code.py` on an **Unexpected Maker FeatherS3** (ESP32-S3 240MHz dual-core, 2.4GHz WiFi + BLE 5.0). The goal is to port it to ESP-IDF 6.0 C for better performance, real-time control, and FreeRTOS task management.
+The FlipDotCircleClock is a flip-dot circle clock running on an **Unexpected Maker FeatherS3** (ESP32-S3 bare die, 240MHz dual-core, 16MB QSPI Flash, 8MB QSPI PSRAM, 2.4GHz WiFi + BLE 5.0). Ported from CircuitPython to ESP-IDF 6.0 C for dual-core FreeRTOS performance.
 
 **Hardware controlled:**
 - DS3231 RTC (I2C 0x68), SH1107 OLED 128x64 (I2C 0x3C), AS5600 magnetic encoder (I2C 0x36)
@@ -405,7 +405,14 @@ FlipDotCircleClock/
 
 **ESP-IDF APIs:** `esp_http_server`, `cJSON`
 
+**PSRAM Configuration (resolved):**
+- FeatherS3 uses **Quad SPI PSRAM** (4 data lines via SPID/SPIQ/SPIWP/SPIHD), NOT Octal
+- Confirmed from FeatherS3 schematic: PSRAM chip U6 has SIO0-SIO3 only, connected to internal SPI bus
+- GPIO 33-37 are NOT used by PSRAM — they go to headers (buttons, flipdot SPI)
+- `CONFIG_SPIRAM_MODE_OCT=y` caused boot hang because it tried to claim GPIO 33-37 for octal data bus
+- Correct config: `CONFIG_SPIRAM=y`, `CONFIG_SPIRAM_MODE_QUAD=y`, `CONFIG_SPIRAM_USE_MALLOC=y`
+- malloc automatically spills to PSRAM when internal RAM (~370KB) is full
+
 **Known issues:**
-- PSRAM not enabled (FeatherS3 SPIRAM mode causes boot hang — needs investigation)
-- LittleFS persistent log disabled (component dependency issue)
-- OTA not implemented
+- LittleFS persistent log disabled (component dependency issue — TODO)
+- OTA not implemented (frontend has UI stubs — TODO)

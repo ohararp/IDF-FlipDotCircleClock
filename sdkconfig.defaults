@@ -10,6 +10,11 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 # Console over USB CDC (FeatherS3 native USB)
 CONFIG_ESP_CONSOLE_USB_CDC=y
 
+# PSRAM: 8MB Quad SPI on FeatherS3 (confirmed from schematic — 4 data lines, NOT octal)
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_USE_MALLOC=y
+
 # Bluetooth: NimBLE for BLE provisioning
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y

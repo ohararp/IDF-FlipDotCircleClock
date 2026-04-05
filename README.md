@@ -4,7 +4,7 @@ ESP-IDF 6.0 (C/FreeRTOS) port of the [FlipDotCircleClock](https://github.com/oha
 
 ## Hardware
 
-- **MCU:** Unexpected Maker FeatherS3 (ESP32-S3, 240 MHz dual-core, 16 MB flash)
+- **MCU:** Unexpected Maker FeatherS3 (ESP32-S3 bare die, 240 MHz dual-core, 16 MB QSPI flash, 8 MB QSPI PSRAM)
 - **Hour display:** 3-column x 4-row flip-dot matrix (12 dots, 24V relay-switched, SPI-controlled)
 - **Minute hand:** TMC2209 stepper driver, 0.9deg/step motor, 32x microstepping (12,800 steps/rev)
 - **Positioning:** AS5600 magnetic encoder for PID closed-loop control (±0.09° accuracy)

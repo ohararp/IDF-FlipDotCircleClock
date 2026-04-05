@@ -97,7 +97,9 @@
             <div class="k">IP Address</div><div class="v" id="ip">--</div>
             <div class="k">RSSI</div><div class="v" id="rssi">-- dBm</div>
             <div class="k">Uptime</div><div class="v" id="uptime">--</div>
-            <div class="k">Free Heap</div><div class="v" id="heap">--</div>
+            <div class="k">RAM</div><div class="v" id="heap">--</div>
+            <div class="k">PSRAM</div><div class="v" id="psram">--</div>
+            <div class="k">Flash</div><div class="v" id="flash">--</div>
             <div class="k">Firmware</div><div class="v" id="firmware">--</div>
           </div>
         </div>
@@ -112,8 +114,7 @@
           </div>
           <div class="actions">
             <button id="btnHome">Home</button>
-            <button id="btnWipe">Wipe Display</button>
-            <button id="btnRefresh">Refresh Hour</button>
+            <button id="btnWipe">Refresh Time</button>
             <button id="btnAnimSync">Sync Animation</button>
           </div>
 
@@ -124,14 +125,13 @@
           </div>
           <div class="actions">
             <span style="font-size:12px;opacity:0.8;">Speed:</span>
-            <select id="speedSelect" style="width:100px;">
+            <select id="speedSelect" style="width:120px;">
               <script>
                 for(var i=100;i<=1000;i+=25){
                   document.write('<option value="'+i+'"'+(i===450?' selected':'')+'>'+i+' μs</option>');
                 }
               </script>
             </select>
-            <button id="btnSetSpeed">Set</button>
             <span style="font-size:12px;opacity:0.8;">Current: <span id="currentSpeed">450</span> μs</span>
           </div>
           <h2 style="margin-top:14px;">Calibration</h2>
@@ -206,7 +206,15 @@
       text('ip',d.ip);
       text('rssi',d.rssi+' dBm');
       text('uptime',d.uptime_s+'s');
-      text('heap',d.free_heap+' bytes');
+      var usedKB=Math.round((d.total_heap-d.free_heap)/1024);
+      var totalKB=Math.round(d.total_heap/1024);
+      text('heap',usedKB+'KB / '+totalKB+'KB');
+      var psUsedKB=Math.round((d.total_psram-d.free_psram)/1024);
+      var psTotalKB=Math.round(d.total_psram/1024);
+      text('psram',psUsedKB+'KB / '+psTotalKB+'KB');
+      var flUsedMB=(d.flash_used/1048576).toFixed(1);
+      var flTotalMB=(d.flash_total/1048576).toFixed(0);
+      text('flash',flUsedMB+'MB / '+flTotalMB+'MB');
       text('firmware',d.version);
       text('motorPos',d.motor_pos);
       text('as5600',d.as5600_angle);
@@ -273,10 +281,9 @@
   $('btnMinPlus').onclick=function(){action('/set_min');};
   $('btnHome').onclick=function(){action('/home');};
   $('btnWipe').onclick=function(){action('/wipe');};
-  $('btnRefresh').onclick=function(){action('/refresh');};
   $('btnAnimSync').onclick=function(){action('/anim/sync');};
-  $('btnSetSpeed').onclick=function(){
-    var v=parseInt($('speedSelect').value)||450;
+  $('speedSelect').onchange=function(){
+    var v=parseInt(this.value)||450;
     action('/set_speed',{delay_us:v});
   };
   $('tzSelect').onchange=function(){if(this.value)action('/set_timezone',{timezone:this.value});};

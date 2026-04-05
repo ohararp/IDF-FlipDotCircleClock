@@ -5,6 +5,7 @@
 #include "as5600.h"
 #include "flipdot.h"
 #include "calibration.h"
+#include "action_log.h"
 #include "oled_display.h"
 #include "gpio_config.h"
 #include "esp_log.h"
@@ -253,4 +254,5 @@ void clock_update_hour(const struct tm *local)
     flipdot_power_off();            // CRITICAL: always shut off 24V relay
 
     ESP_LOGI(TAG, "Hour update: %02d → flipdot %d", local->tm_hour, hour);
+    { char buf[32]; snprintf(buf, sizeof(buf), "Flipdot → hour %d", hour); action_log_add(buf); }
 }

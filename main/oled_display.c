@@ -57,16 +57,11 @@ static uint8_t u8x8_byte_i2c_cb(u8x8_t *u8x8, uint8_t msg,
         break;
 
     case U8X8_MSG_BYTE_END_TRANSFER:
-        // Transmit accumulated buffer to OLED — retry on timeout (BLE stack can cause contention)
+        // Transmit OLED data — short timeout, no retry (fail fast if bus is busy with AS5600)
         if (buf_idx > 0 && s_oled_dev != NULL) {
-            esp_err_t ret;
-            for (int attempt = 0; attempt < 3; attempt++) {
-                ret = i2c_master_transmit(s_oled_dev, buffer, buf_idx, 500);
-                if (ret == ESP_OK) break;
-                vTaskDelay(pdMS_TO_TICKS(10)); // brief pause before retry
-            }
+            esp_err_t ret = i2c_master_transmit(s_oled_dev, buffer, buf_idx, 50);
             if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "I2C transmit failed: %s", esp_err_to_name(ret));
+                // Silently skip — display task will retry on next 1s cycle
                 return 0;
             }
         }

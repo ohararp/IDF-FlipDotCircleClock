@@ -6,6 +6,7 @@
 #include "network.h"
 #include "timekeeping.h"
 #include "oled_display.h"
+#include "action_log.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -71,6 +72,7 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
             s_state = NETWORK_DISCONNECTED;
             ESP_LOGW(TAG, "WiFi disconnected");
+            action_log_add("WiFi disconnected");
             if (s_retry_count < MAX_RETRIES) {
                 // Exponential backoff: wait before retrying
                 int delay = s_backoff_ms[s_retry_count < 5 ? s_retry_count : 4];
@@ -93,6 +95,7 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         snprintf(s_ip_str, sizeof(s_ip_str), IPSTR, IP2STR(&event->ip_info.ip));
         ESP_LOGI(TAG, "WiFi connected: %s", s_ip_str);
+        action_log_add("WiFi connected");
         s_state = NETWORK_CONNECTED;
         s_retry_count = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
@@ -154,6 +157,7 @@ static void ntp_sync_callback(struct timeval *tv)
     time_t now = tv->tv_sec;
     ESP_LOGI(TAG, "NTP synced: UTC epoch=%ld", (long)now);
     oled_terminal_print("NTP synced!");
+    action_log_add("NTP time synced");
 
     // Write UTC to RTC and enable timezone conversion
     timekeeping_sync_from_ntp(now);
@@ -268,57 +272,7 @@ static void request_provisioning(void)
     }
 }
 
-// Check if WiFi credentials exist by reading NVS directly (avoids init/deinit of prov manager)
-static bool has_wifi_credentials(void)
-{
-    nvs_handle_t nvs;
-    if (nvs_open("nvs.net80211", NVS_READONLY, &nvs) != ESP_OK) return false;
-    // The WiFi stack stores SSID in "sta.ssid" key
-    size_t len = 0;
-    esp_err_t ret = nvs_get_blob(nvs, "sta.ssid", NULL, &len);
-    nvs_close(nvs);
-    return (ret == ESP_OK && len > 0);
-}
-
-// Decide boot path: provisioning requested, credentials exist, or skip WiFi
-static esp_err_t decide_boot_path(void)
-{
-    bool prov_requested = check_prov_requested();
-    bool has_creds = has_wifi_credentials();
-
-    if (prov_requested || !has_creds) {
-        if (prov_requested) {
-            ESP_LOGI(TAG, "Provisioning requested via button");
-            // Erase old credentials so prov manager sees "not provisioned"
-            nvs_handle_t nvs;
-            if (nvs_open("nvs.net80211", NVS_READWRITE, &nvs) == ESP_OK) {
-                nvs_erase_all(nvs);
-                nvs_commit(nvs);
-                nvs_close(nvs);
-            }
-        }
-
-        if (!prov_requested && !has_creds) {
-            // No credentials and no request — just skip WiFi, don't start BLE
-            ESP_LOGI(TAG, "No WiFi — hold A to setup");
-            oled_terminal_print("No WiFi config");
-            oled_terminal_print("Hold A to setup");
-            s_state = NETWORK_OFFLINE;
-            return ESP_ERR_NOT_FOUND;
-        }
-
-        // Start BLE provisioning (prov manager handles WiFi init internally)
-        network_start_provisioning();
-        return ESP_OK;
-    }
-
-    // Credentials exist — connect WiFi directly (no prov manager needed)
-    ESP_LOGI(TAG, "WiFi credentials found — connecting");
-    oled_terminal_print("WiFi: connecting...");
-    s_state = NETWORK_CONNECTING;
-    esp_wifi_start();
-    return ESP_OK;
-}
+// (has_wifi_credentials and decide_boot_path removed — replaced by prov manager check in network_init)
 
 // Start BLE provisioning on-demand (called from Button A long press)
 void network_start_provisioning(void)

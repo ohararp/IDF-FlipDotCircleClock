@@ -8,6 +8,7 @@
 #include "gpio_config.h"
 #include "nvm_storage.h"
 #include "oled_display.h"
+#include "action_log.h"
 #include "esp_log.h"
 #include "pid_ctrl.h"
 #include "esp_rom_sys.h"
@@ -207,9 +208,11 @@ esp_err_t stepper_find_home(void)
             if (stepper_move_to_angle(home_angle, 1)) {
                 s_step_now = 0; // at 12 o'clock = step 0
                 home_log("Home: done!");
+                action_log_add("Homed to 12:00 (PID)");
                 return ESP_OK;
             }
             home_log("Home: PID failed!");
+            action_log_add("Home PID failed");
             return ESP_FAIL;
         }
         home_log("Home: not calibrated! Hold C to cal");
@@ -254,8 +257,10 @@ bool stepper_move_to_angle(uint16_t target_raw, int tolerance)
         // CW-only distance to target (always positive, wraps around 4096)
         int cw_dist = (target_raw - current + 4096) % 4096;
 
-        // Check if within tolerance — target reached
-        if (cw_dist <= tolerance || cw_dist >= (4096 - tolerance)) {
+        // Check if within tolerance — either CW or CCW distance (handles slight overshoot)
+        int ccw_dist = 4096 - cw_dist;
+        int actual_err = (cw_dist < ccw_dist) ? cw_dist : ccw_dist;
+        if (actual_err <= tolerance) {
             s_step_now = as5600_to_steps(current);
             ESP_LOGI(TAG, "PID converged: cur=%d err=%d iter=%d", current, cw_dist, iter);
             converged = true;

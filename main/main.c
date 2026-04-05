@@ -21,6 +21,8 @@
 #include "timekeeping.h"
 #include "network.h"
 #include "web_server.h"
+#include "web_commands.h"
+#include "action_log.h"
 
 static const char *TAG = "main";
 
@@ -38,6 +40,9 @@ static int s_current_hour_12 = 0;
 
 // Track if buttons were initialized (may be init'd early for provisioning cancel)
 static bool s_buttons_inited = false;
+
+// Global command queue for web API → main loop (cross-core)
+QueueHandle_t g_web_cmd_queue = NULL;
 
 // Startup trackers — set by setup() so main loop doesn't duplicate the first update
 static int s_startup_hr = -1;
@@ -76,8 +81,16 @@ static void display_task(void *arg)
 {
     struct tm local;
     while (1) {
+        // Cache AS5600 angle for web server (read before OLED to minimize bus contention)
+        if (as5600_is_connected()) {
+            uint16_t angle;
+            if (as5600_read_raw_angle(&angle) == ESP_OK) {
+                web_server_update_as5600(angle);
+            }
+        }
+
         if (calibration_is_active() && as5600_is_connected()) {
-            // During calibration: show live AS5600 angle so user can see hand position
+            // During calibration: show live AS5600 angle on OLED
             uint16_t angle;
             if (as5600_read_raw_angle(&angle) == ESP_OK) {
                 char buf[26];
@@ -86,10 +99,11 @@ static void display_task(void *arg)
                 ESP_LOGI(TAG, "CAL: AS5600 raw=%d (%.1f deg)", angle, as5600_to_degrees(angle));
             }
         } else if (timekeeping_get_local_time(&local) == ESP_OK) {
-            // Normal mode: log local time to serial and update OLED
+            // Normal mode: log local time to serial, update OLED, cache for web server
             ESP_LOGI(TAG, "Local: %04d-%02d-%02d %02d:%02d:%02d",
                      local.tm_year + 1900, local.tm_mon + 1, local.tm_mday,
                      local.tm_hour, local.tm_min, local.tm_sec);
+            web_server_update_time(&local);
             if (s_oled_ok) {
                 oled_update_main(&local, NULL);
             }
@@ -107,9 +121,10 @@ static void setup(void)
     const esp_app_desc_t *app_desc = esp_app_get_description();
     ESP_LOGI(TAG, "FlipDotCircleClock v%s starting...", app_desc->version);
 
-    // 1. Persistent config + timekeeping
+    // 1. Persistent config + timekeeping + action log
     ESP_ERROR_CHECK(nvm_init());
     ESP_ERROR_CHECK(timekeeping_init());
+    action_log_init();
 
     // 2. NeoPixel status LED — reflects network state (purple/green/yellow/cyan)
     ESP_ERROR_CHECK(neopixel_init());
@@ -157,7 +172,8 @@ static void setup(void)
     // 4. WiFi (non-blocking — connects in background if credentials stored, skips if not)
     network_init();
 
-    // 4b. Web server — start immediately, serves pages once WiFi connects
+    // 4b. Web command queue (web API Core 0 → main loop) + web server
+    g_web_cmd_queue = xQueueCreate(8, sizeof(web_cmd_t));
     web_server_start();
 
     // If BLE provisioning is active, hold here with QR on OLED until done or C to skip
@@ -268,6 +284,7 @@ void app_main(void)
             if (local.tm_min != min_old) {
                 if (xSemaphoreTake(s_hw_mutex, pdMS_TO_TICKS(500))) {
                     ESP_LOGI(TAG, "Minute changed: %02d → %02d", min_old, local.tm_min);
+                    action_log_add("Minute update");
                     clock_update_minute(&local);
                     min_old = local.tm_min;
                     xSemaphoreGive(s_hw_mutex);
@@ -278,7 +295,9 @@ void app_main(void)
             if (local.tm_hour != hr_old) {
                 if (xSemaphoreTake(s_hw_mutex, pdMS_TO_TICKS(500))) {
                     ESP_LOGI(TAG, "Hour changed: %02d → %02d", hr_old, local.tm_hour);
+                    action_log_add("Hour update");
                     if (s_display_task) vTaskSuspend(s_display_task);
+                    vTaskDelay(pdMS_TO_TICKS(100)); // let any in-progress I2C transfer complete
                     clock_update_hour(&local);
                     stepper_find_home();
                     clock_update_minute(&local);
@@ -298,12 +317,14 @@ void app_main(void)
             // All button actions: acquire hardware mutex + suspend display task
             if (xSemaphoreTake(s_hw_mutex, pdMS_TO_TICKS(2000))) {
                 if (s_display_task) vTaskSuspend(s_display_task);
+                vTaskDelay(pdMS_TO_TICKS(100)); // let any in-progress I2C transfer complete
 
                 switch (event) {
 
                 case BUTTON_EVENT_A_SHORT:
                     // Sync animation: synchronized hand + flipdot sweep through all 12 hours
                     ESP_LOGI(TAG, "Btn A short — sync animation");
+                    action_log_add("Sync animation (btn A)");
                     anim_sync();
                     timekeeping_get_local_time(&local);
                     min_old = local.tm_min;
@@ -314,6 +335,7 @@ void app_main(void)
                     // Request WiFi provisioning — sets NVS flag and reboots
                     // On reboot, BLE prov starts cleanly before WiFi stack init
                     ESP_LOGI(TAG, "Btn A long — request WiFi provisioning");
+                    action_log_add("WiFi prov requested (btn A)");
                     oled_terminal_print("WiFi setup...");
                     oled_terminal_print("Rebooting...");
                     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -327,6 +349,7 @@ void app_main(void)
                     ds3231_set_time(&local);                    // write adjusted time back to RTC
                     s_current_hour_12 = local.tm_hour % 12;
                     if (s_current_hour_12 == 0) s_current_hour_12 = 12;
+                    action_log_add("+1 hour (btn B)");
                     ESP_LOGI(TAG, "Btn B short — +1 hour → %02d:%02d (h12=%d)",
                              local.tm_hour, local.tm_min, s_current_hour_12);
                     flipdot_power_on();
@@ -340,6 +363,7 @@ void app_main(void)
                 case BUTTON_EVENT_B_LONG:
                     // Manual WiFi reconnect attempt
                     ESP_LOGI(TAG, "Btn B long — WiFi reconnect");
+                    action_log_add("WiFi reconnect (btn B)");
                     network_recover();
                     break;
 
@@ -352,6 +376,7 @@ void app_main(void)
                         local.tm_sec = 0;                           // reset seconds
                         ds3231_set_time(&local);                    // write adjusted time back to RTC
                         ESP_LOGI(TAG, "Btn C short — +1 min → %02d:%02d", local.tm_hour, local.tm_min);
+                        action_log_add("+1 min (btn C)");
                         // Move minute hand to correct position using PID closed-loop
                         clock_update_minute(&local);
                         min_old = local.tm_min;  // sync tracker to prevent re-trigger
@@ -363,6 +388,7 @@ void app_main(void)
                     if (!calibration_is_active()) {
                         // Enter calibration — motor stays enabled, user repositions hand
                         ESP_LOGI(TAG, "Btn C long — enter calibration");
+                        action_log_add("Calibration enter (btn C)");
                         calibration_enter();
                         // Drain any pending button events from this same long press
                         { app_button_event_t discard;
@@ -370,6 +396,7 @@ void app_main(void)
                     } else if (calibration_ready_to_save()) {
                         // Save calibration — only if >=3s have elapsed since entering
                         ESP_LOGI(TAG, "Btn C long — save calibration");
+                        action_log_add("Calibration saved (btn C)");
                         calibration_save();
                         vTaskDelay(pdMS_TO_TICKS(2000)); // hold result on screen
                         // Re-sync minute hand to current time after calibration
@@ -385,6 +412,143 @@ void app_main(void)
                 }
 
                 // Resume display task after any button action completes
+                if (s_display_task) vTaskResume(s_display_task);
+                xSemaphoreGive(s_hw_mutex);
+            }
+        }
+
+        // Process web API commands (cross-core: web server Core 0 → main loop)
+        web_cmd_t web_cmd;
+        while (xQueueReceive(g_web_cmd_queue, &web_cmd, 0) == pdTRUE) {
+            if (xSemaphoreTake(s_hw_mutex, pdMS_TO_TICKS(2000))) {
+                if (s_display_task) vTaskSuspend(s_display_task);
+                vTaskDelay(pdMS_TO_TICKS(100)); // let any in-progress I2C transfer complete
+
+                switch (web_cmd.type) {
+                case WEB_CMD_SET_HOUR:
+                    timekeeping_get_local_time(&local);
+                    local.tm_hour = (local.tm_hour + 1) % 24;
+                    ds3231_set_time(&local);
+                    s_current_hour_12 = local.tm_hour % 12;
+                    if (s_current_hour_12 == 0) s_current_hour_12 = 12;
+                    flipdot_power_on();
+                    flipdot_show_hour(s_current_hour_12);
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                    flipdot_power_off();
+                    hr_old = local.tm_hour;
+                    min_old = local.tm_min;
+                    ESP_LOGI(TAG, "Web: +1 hour → %d", s_current_hour_12);
+                    action_log_add("+1 hour (web)");
+                    break;
+
+                case WEB_CMD_SET_MIN:
+                    timekeeping_get_local_time(&local);
+                    local.tm_min = (local.tm_min + 1) % 60;
+                    if (local.tm_min == 0) local.tm_hour = (local.tm_hour + 1) % 24;
+                    local.tm_sec = 0;
+                    ds3231_set_time(&local);
+                    clock_update_minute(&local);
+                    min_old = local.tm_min;
+                    hr_old = local.tm_hour;
+                    ESP_LOGI(TAG, "Web: +1 min → %02d:%02d", local.tm_hour, local.tm_min);
+                    action_log_add("+1 min (web)");
+                    break;
+
+                case WEB_CMD_HOME:
+                    // Home, hold at 12 o'clock for 5s, then reposition to current minute
+                    stepper_find_home();
+                    vTaskDelay(pdMS_TO_TICKS(5000));
+                    timekeeping_get_local_time(&local);
+                    clock_update_minute(&local);
+                    min_old = local.tm_min;
+                    hr_old = local.tm_hour;
+                    ESP_LOGI(TAG, "Web: home → 5s hold → reposition");
+                    action_log_add("Home (web)");
+                    break;
+
+                case WEB_CMD_WIPE:
+                    // Full refresh: blank → home → show hour → set minute
+                    flipdot_power_on();
+                    flipdot_blank();
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                    flipdot_power_off();
+                    stepper_find_home();
+                    timekeeping_get_local_time(&local);
+                    clock_update_hour(&local);
+                    clock_update_minute(&local);
+                    s_current_hour_12 = local.tm_hour % 12;
+                    if (s_current_hour_12 == 0) s_current_hour_12 = 12;
+                    min_old = local.tm_min;
+                    hr_old = local.tm_hour;
+                    ESP_LOGI(TAG, "Web: refresh time");
+                    action_log_add("Refresh time (web)");
+                    break;
+
+                case WEB_CMD_REFRESH:
+                    // Refresh hour display only
+                    timekeeping_get_local_time(&local);
+                    clock_update_hour(&local);
+                    hr_old = local.tm_hour;
+                    ESP_LOGI(TAG, "Web: refresh hour");
+                    break;
+
+                case WEB_CMD_ANIM_SYNC:
+                    anim_sync();
+                    timekeeping_get_local_time(&local);
+                    min_old = local.tm_min;
+                    hr_old = local.tm_hour;
+                    ESP_LOGI(TAG, "Web: sync animation");
+                    action_log_add("Sync animation (web)");
+                    break;
+
+                case WEB_CMD_SET_TIMEZONE:
+                    timekeeping_set_timezone((uint8_t)web_cmd.param);
+                    timekeeping_get_local_time(&local);
+                    clock_update_hour(&local);
+                    clock_update_minute(&local);
+                    hr_old = local.tm_hour;
+                    min_old = local.tm_min;
+                    ESP_LOGI(TAG, "Web: timezone → %d", web_cmd.param);
+                    action_log_add("Timezone changed (web)");
+                    break;
+
+                case WEB_CMD_SET_SPEED:
+                    nvm_set_step_delay((uint16_t)web_cmd.param);
+                    ESP_LOGI(TAG, "Web: speed → %d µs", web_cmd.param);
+                    action_log_add("Speed changed (web)");
+                    break;
+
+                case WEB_CMD_SYNC_NTP:
+                    network_recover(); // trigger WiFi reconnect which re-syncs NTP
+                    ESP_LOGI(TAG, "Web: NTP sync requested");
+                    action_log_add("NTP sync (web)");
+                    break;
+
+                case WEB_CMD_CAL_START:
+                    calibration_enter();
+                    ESP_LOGI(TAG, "Web: calibration start");
+                    action_log_add("Calibration enter (web)");
+                    break;
+
+                case WEB_CMD_CAL_SAVE:
+                    if (calibration_ready_to_save()) {
+                        calibration_save();
+                        timekeeping_get_local_time(&local);
+                        clock_update_minute(&local);
+                        min_old = local.tm_min;
+                        hr_old = local.tm_hour;
+                    }
+                    ESP_LOGI(TAG, "Web: calibration save");
+                    action_log_add("Calibration saved (web)");
+                    break;
+
+                case WEB_CMD_CAL_CANCEL:
+                    calibration_cancel();
+                    ESP_LOGI(TAG, "Web: calibration cancel");
+                    action_log_add("Calibration cancel (web)");
+                    break;
+                }
+
                 if (s_display_task) vTaskResume(s_display_task);
                 xSemaphoreGive(s_hw_mutex);
             }

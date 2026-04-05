@@ -39,7 +39,7 @@ idf.py -p /dev/cu.usbmodem1101 flash monitor
 - [x] **Step 9:** Full button input, PID closed-loop AS5600 positioning (±0.4°), calibration flow
 - [x] **Step 10:** Animations (sync) with PID positioning (±0.09°), trapezoidal ramping
 - [x] **Step 11:** Skipped — standalone clock functional, soak testing during Step 12
-- [ ] **Step 12:** WiFi + NTP synchronization
+- [x] **Step 12:** WiFi + BLE provisioning + NTP sync + QR code on OLED
 - [ ] **Step 13:** HTTP web server + JSON API + OTA updates
 
 ## License

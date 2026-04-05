@@ -90,7 +90,7 @@ static void display_task(void *arg)
                      local.tm_year + 1900, local.tm_mon + 1, local.tm_mday,
                      local.tm_hour, local.tm_min, local.tm_sec);
             if (s_oled_ok) {
-                oled_update_time(&local);
+                oled_update_main(&local, NULL);
             }
         } else {
             ESP_LOGW(TAG, "Failed to read local time");

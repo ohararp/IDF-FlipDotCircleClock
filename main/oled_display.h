@@ -9,11 +9,9 @@
 // Initialize SH1107 128x64 OLED on an existing I2C bus via U8G2 library
 esp_err_t oled_init(i2c_master_bus_handle_t bus_handle);
 
-// Display time as HH:MM:SS in large font, centered on screen
-void oled_update_time(const struct tm *time);
-
-// Display status info: IP address, RSSI, uptime, motor position
-void oled_update_status(const char *ip, int rssi, uint32_t uptime, int motor_pos);
+// Main display: time, date, status, network info, WiFi dot (matches CP layout)
+// Pulls network state from network.h directly. status_text can be NULL for default.
+void oled_update_main(const struct tm *time, const char *status_text);
 
 // Clear the entire OLED display
 void oled_clear(void);

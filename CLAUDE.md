@@ -138,14 +138,22 @@ FlipDotCircleClock/
 **Implemented:**
 - `oled_display.c/.h` — SH1107 128x64 OLED via **U8G2 library** (not esp_lcd/LVGL)
   - `oled_init(i2c_master_bus_handle_t bus)` — U8G2 setup with `u8g2_Setup_sh1107_i2c_64x128_f()`, 90° rotation to 128x64 landscape
-  - `oled_update_time(const struct tm *time)` — large HH:MM:SS (14px font) + date (8px font)
-  - `oled_update_status(const char *ip, int rssi, uint32_t uptime, int motor_pos)` — 3-line status
+  - `oled_update_main(const struct tm *time, const char *status_text)` — main display matching CircuitPython layout:
+    - Rounded border (2px, 5px corner radius) via `u8g2_DrawRFrame()`
+    - WiFi dot top-right: filled circle (connected) or hollow circle (offline)
+    - Time HH:MM:SS centered (`u8g2_font_6x12_tr` — exact match to CircuitPython's `terminalio.FONT`)
+    - Status text centered (`u8g2_font_6x10_tr`)
+    - Two-column network status: `WiFi:OK  NTP:Sync` / `WiFi:Off  NTP:Pend` / `WiFi:Off  BLE:Prov`
+    - IP address centered (from `network_get_ip_str()`)
+    - Date YYYY-MM-DD centered
   - `oled_terminal_print(const char *line)` — scrolling 8-line terminal (5x7 monospace font) for homing/debug output
+  - `oled_show_qr(const char *text)` — QR code with label text for BLE provisioning
   - `oled_clear()`
-- I2C byte callback + GPIO/delay callback for U8G2 ↔ ESP-IDF I2C bridge
+- I2C byte callback with retry logic (3 attempts, 500ms timeout) for BLE coexistence
 - Display task shows live AS5600 angle during calibration mode
+- Pulls network state directly from `network.h` for WiFi/NTP/BLE status display
 
-**Dependencies:** `u8g2` (git: olikraus/u8g2)
+**Dependencies:** `u8g2` (git: olikraus/u8g2), `espressif/qrcode: "^0.2.0"`
 
 ---
 

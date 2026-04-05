@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "oled_display.h"
+#include "network.h"
 #include "esp_log.h"
 #include "qrcode.h"
 #include "esp_rom_sys.h"
@@ -128,44 +129,81 @@ esp_err_t oled_init(i2c_master_bus_handle_t bus_handle)
     return ESP_OK;
 }
 
-// Render HH:MM:SS in large centered font, with date in smaller font below
-void oled_update_time(const struct tm *time)
+// Helper: draw string centered horizontally at given y position
+static void draw_centered(const char *str, int y)
 {
-    char time_str[9];  // "HH:MM:SS\0"
-    char date_str[36]; // "YYYY-MM-DD\0" — oversized to satisfy -Wformat-truncation
+    int w = u8g2_GetStrWidth(&s_u8g2, str);
+    u8g2_DrawStr(&s_u8g2, (128 - w) / 2, y, str);
+}
 
+// Main display: time, status, network info, IP, date — matches CircuitPython layout
+void oled_update_main(const struct tm *time, const char *status_text)
+{
+    char time_str[9];   // "HH:MM:SS\0"
+    char date_str[36];  // "YYYY-MM-DD\0"
+    char wifi_col[12];  // "WiFi:OK" etc
+    char ntp_col[12];   // "NTP:Sync" etc
+
+    // Format time and date
     snprintf(time_str, sizeof(time_str), "%02d:%02d:%02d",
              time->tm_hour, time->tm_min, time->tm_sec);
     snprintf(date_str, sizeof(date_str), "%04d-%02d-%02d",
              time->tm_year + 1900, time->tm_mon + 1, time->tm_mday);
 
+    // Build WiFi status column
+    network_state_t net = network_get_state();
+    switch (net) {
+    case NETWORK_CONNECTED:    snprintf(wifi_col, sizeof(wifi_col), "WiFi:OK");  break;
+    case NETWORK_CONNECTING:   snprintf(wifi_col, sizeof(wifi_col), "WiFi:..."); break;
+    case NETWORK_PROVISIONING: snprintf(wifi_col, sizeof(wifi_col), "WiFi:Off"); break;
+    default:                   snprintf(wifi_col, sizeof(wifi_col), "WiFi:Off"); break;
+    }
+
+    // Build NTP/BLE status column
+    if (net == NETWORK_PROVISIONING) {
+        snprintf(ntp_col, sizeof(ntp_col), "BLE:Prov");
+    } else if (network_ntp_synced()) {
+        snprintf(ntp_col, sizeof(ntp_col), "NTP:Sync");
+    } else {
+        snprintf(ntp_col, sizeof(ntp_col), "NTP:Pend");
+    }
+
+    // Get IP address string
+    const char *ip = network_get_ip_str();
+
     u8g2_ClearBuffer(&s_u8g2);
-    // Large time display centered horizontally
-    u8g2_SetFont(&s_u8g2, u8g2_font_ncenB14_tr); // 14px Century bold font
-    u8g2_DrawStr(&s_u8g2, 16, 30, time_str);
-    // Smaller date below the time
-    u8g2_SetFont(&s_u8g2, u8g2_font_ncenB08_tr); // 8px Century bold font
-    u8g2_DrawStr(&s_u8g2, 24, 50, date_str);
-    u8g2_SendBuffer(&s_u8g2); // push framebuffer to display over I2C
-}
 
-// Render status fields: IP, WiFi signal, uptime, and motor step position
-void oled_update_status(const char *ip, int rssi, uint32_t uptime, int motor_pos)
-{
-    char line1[32]; // IP address line
-    char line2[32]; // RSSI + uptime line
-    char line3[32]; // motor position line
+    // Rounded border (2px, 5px corner radius)
+    u8g2_DrawRFrame(&s_u8g2, 0, 0, 128, 64, 5);
 
-    snprintf(line1, sizeof(line1), "IP: %s", ip ? ip : "N/A");
-    snprintf(line2, sizeof(line2), "RSSI:%d Up:%lus", rssi, (unsigned long)uptime);
-    snprintf(line3, sizeof(line3), "Motor: %d", motor_pos);
+    // WiFi dot — top right corner (filled=connected, hollow=offline)
+    if (net == NETWORK_CONNECTED) {
+        u8g2_DrawDisc(&s_u8g2, 120, 8, 4, U8G2_DRAW_ALL); // filled circle
+    } else {
+        u8g2_DrawCircle(&s_u8g2, 120, 8, 4, U8G2_DRAW_ALL); // hollow circle
+    }
 
-    u8g2_ClearBuffer(&s_u8g2);
-    u8g2_SetFont(&s_u8g2, u8g2_font_ncenB08_tr); // 8px font for status lines
-    u8g2_DrawStr(&s_u8g2, 0, 15, line1);
-    u8g2_DrawStr(&s_u8g2, 0, 35, line2);
-    u8g2_DrawStr(&s_u8g2, 0, 55, line3);
-    u8g2_SendBuffer(&s_u8g2); // push framebuffer to display over I2C
+    // Line 1: Time (6x12 monospace, centered) — y=18 (baseline)
+    u8g2_SetFont(&s_u8g2, u8g2_font_6x12_tr);
+    draw_centered(time_str, 18);
+
+    // Line 2: Status text (6x10, centered) — y=29
+    u8g2_SetFont(&s_u8g2, u8g2_font_6x10_tr);
+    if (status_text && status_text[0] != '\0') {
+        draw_centered(status_text, 29);
+    }
+
+    // Line 3: Two-column network status (6x10) — y=40
+    u8g2_DrawStr(&s_u8g2, 6, 40, wifi_col);           // left column
+    u8g2_DrawStr(&s_u8g2, 72, 40, ntp_col);            // right column
+
+    // Line 4: IP address (6x10, centered) — y=51
+    draw_centered(ip, 51);
+
+    // Line 5: Date (6x10, centered) — y=61
+    draw_centered(date_str, 61);
+
+    u8g2_SendBuffer(&s_u8g2);
 }
 
 // Clear the OLED framebuffer and push blank screen to display

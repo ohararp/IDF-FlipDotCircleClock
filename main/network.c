@@ -80,7 +80,7 @@ static void event_handler(void *arg, esp_event_base_t event_base,
                 esp_wifi_connect();
             } else {
                 s_state = NETWORK_OFFLINE;
-                ESP_LOGW(TAG, "WiFi offline after %d retries — periodic reconnect in 60s", MAX_RETRIES);
+                ESP_LOGW(TAG, "WiFi offline after %d retries — periodic reconnect every 5 min", MAX_RETRIES);
                 xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
                 // Start periodic reconnect timer (every 60s)
                 start_reconnect_timer();
@@ -212,7 +212,7 @@ static void reconnect_timer_cb(void *arg)
     }
 }
 
-// Start the 60s periodic reconnect timer
+// Start the 5-minute periodic reconnect timer
 static void start_reconnect_timer(void)
 {
     if (s_reconnect_timer == NULL) {
@@ -222,8 +222,8 @@ static void start_reconnect_timer(void)
         };
         esp_timer_create(&args, &s_reconnect_timer);
     }
-    esp_timer_start_periodic(s_reconnect_timer, 60ULL * 1000000ULL); // 60s
-    ESP_LOGI(TAG, "Periodic reconnect timer started (60s)");
+    esp_timer_start_periodic(s_reconnect_timer, 300ULL * 1000000ULL); // 5 minutes
+    ESP_LOGI(TAG, "Periodic reconnect timer started (5 min)");
 }
 
 // Stop the periodic reconnect timer (called when WiFi connects)

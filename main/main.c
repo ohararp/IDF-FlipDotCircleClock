@@ -334,10 +334,9 @@ void app_main(void)
                     break;
 
                 case BUTTON_EVENT_B_LONG:
-                    // Placeholder — reserved for future use
-                    ESP_LOGI(TAG, "Btn B long — unassigned");
-                    oled_terminal_print("B long: unassigned");
-                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    // Manual WiFi reconnect attempt
+                    ESP_LOGI(TAG, "Btn B long — WiFi reconnect");
+                    network_recover();
                     break;
 
                 case BUTTON_EVENT_C_SHORT:

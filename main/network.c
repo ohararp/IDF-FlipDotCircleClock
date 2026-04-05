@@ -37,12 +37,26 @@ static bool s_ntp_synced = false;
 #define WIFI_FAIL_BIT       BIT1
 static EventGroupHandle_t s_wifi_event_group;
 
-// Retry counter for WiFi connection
+// Retry counter and exponential backoff for WiFi reconnection
 static int s_retry_count = 0;
-#define MAX_RETRIES 3
+#define MAX_RETRIES 5
+// Backoff delays in ms: 2s, 4s, 8s, 16s, 30s
+static const int s_backoff_ms[] = {2000, 4000, 8000, 16000, 30000};
 
 // NTP re-sync timer handle
 static esp_timer_handle_t s_ntp_timer = NULL;
+
+// Periodic reconnect timer (fires every 60s after going OFFLINE)
+static esp_timer_handle_t s_reconnect_timer = NULL;
+
+// Track if NTP/SNTP has been initialized (so we restart instead of re-init)
+static bool s_sntp_initialized = false;
+
+// Forward declarations
+static void start_ntp(void);
+static void ntp_start_resync_timer(void);
+static void start_reconnect_timer(void);
+static void stop_reconnect_timer(void);
 
 // ── Event handlers ───────────────────────────────────────────────────────────
 
@@ -58,18 +72,23 @@ static void event_handler(void *arg, esp_event_base_t event_base,
             s_state = NETWORK_DISCONNECTED;
             ESP_LOGW(TAG, "WiFi disconnected");
             if (s_retry_count < MAX_RETRIES) {
+                // Exponential backoff: wait before retrying
+                int delay = s_backoff_ms[s_retry_count < 5 ? s_retry_count : 4];
                 s_retry_count++;
-                ESP_LOGI(TAG, "Retrying WiFi (%d/%d)...", s_retry_count, MAX_RETRIES);
+                ESP_LOGI(TAG, "Retrying WiFi in %dms (%d/%d)...", delay, s_retry_count, MAX_RETRIES);
+                vTaskDelay(pdMS_TO_TICKS(delay));
                 esp_wifi_connect();
             } else {
                 s_state = NETWORK_OFFLINE;
-                ESP_LOGW(TAG, "WiFi offline after %d retries", MAX_RETRIES);
+                ESP_LOGW(TAG, "WiFi offline after %d retries — periodic reconnect in 60s", MAX_RETRIES);
                 xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+                // Start periodic reconnect timer (every 60s)
+                start_reconnect_timer();
             }
         }
     }
 
-    // IP events
+    // IP events — fires on every WiFi connect (including reconnects)
     if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         snprintf(s_ip_str, sizeof(s_ip_str), IPSTR, IP2STR(&event->ip_info.ip));
@@ -77,6 +96,12 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         s_state = NETWORK_CONNECTED;
         s_retry_count = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+
+        // Stop periodic reconnect timer if running
+        stop_reconnect_timer();
+
+        // Start or restart NTP on every connect/reconnect
+        start_ntp();
 
         // Start mDNS so clock is discoverable as flipclock.local
         mdns_init();
@@ -136,14 +161,21 @@ static void ntp_sync_callback(struct timeval *tv)
     s_ntp_synced = true;
 }
 
-// Start SNTP client
-static void ntp_start(void)
+// Start or restart SNTP client (safe to call on every WiFi reconnect)
+static void start_ntp(void)
 {
-    ESP_LOGI(TAG, "Starting NTP sync...");
-    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    esp_sntp_setservername(0, "pool.ntp.org");
-    esp_sntp_set_time_sync_notification_cb(ntp_sync_callback);
-    esp_sntp_init();
+    if (s_sntp_initialized) {
+        ESP_LOGI(TAG, "Restarting NTP sync...");
+        esp_sntp_restart();
+    } else {
+        ESP_LOGI(TAG, "Starting NTP sync...");
+        esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+        esp_sntp_setservername(0, "pool.ntp.org");
+        esp_sntp_set_time_sync_notification_cb(ntp_sync_callback);
+        esp_sntp_init();
+        s_sntp_initialized = true;
+        ntp_start_resync_timer();
+    }
 }
 
 // Timer callback: re-sync NTP hourly
@@ -165,6 +197,42 @@ static void ntp_start_resync_timer(void)
     esp_timer_create(&timer_args, &s_ntp_timer);
     esp_timer_start_periodic(s_ntp_timer, 3600ULL * 1000000ULL); // 1 hour in µs
     ESP_LOGI(TAG, "NTP re-sync timer: every 1 hour");
+}
+
+// ── Periodic reconnect (after going OFFLINE) ─────────────────────────────────
+
+// Timer callback: attempt WiFi reconnect every 60s while OFFLINE
+static void reconnect_timer_cb(void *arg)
+{
+    if (s_state == NETWORK_OFFLINE) {
+        ESP_LOGI(TAG, "Periodic reconnect attempt...");
+        s_retry_count = 0; // reset retry counter for fresh attempt
+        s_state = NETWORK_CONNECTING;
+        esp_wifi_connect();
+    }
+}
+
+// Start the 60s periodic reconnect timer
+static void start_reconnect_timer(void)
+{
+    if (s_reconnect_timer == NULL) {
+        esp_timer_create_args_t args = {
+            .callback = reconnect_timer_cb,
+            .name = "wifi_reconnect",
+        };
+        esp_timer_create(&args, &s_reconnect_timer);
+    }
+    esp_timer_start_periodic(s_reconnect_timer, 60ULL * 1000000ULL); // 60s
+    ESP_LOGI(TAG, "Periodic reconnect timer started (60s)");
+}
+
+// Stop the periodic reconnect timer (called when WiFi connects)
+static void stop_reconnect_timer(void)
+{
+    if (s_reconnect_timer != NULL) {
+        esp_timer_stop(s_reconnect_timer);
+        ESP_LOGI(TAG, "Periodic reconnect timer stopped");
+    }
 }
 
 // ── Provisioning ─────────────────────────────────────────────────────────────
@@ -293,9 +361,6 @@ void network_start_provisioning(void)
     ESP_LOGI(TAG, "QR payload: %s", qr_payload);
 }
 
-// Forward declaration for background task
-static void network_wait_task(void *arg);
-
 // ── Public API ───────────────────────────────────────────────────────────────
 
 // Initialize networking — non-blocking. Three paths: provision, connect, or skip.
@@ -374,35 +439,29 @@ esp_err_t network_init(void)
         s_state = NETWORK_CONNECTING;
         network_prov_mgr_deinit(); // don't need prov manager for direct connect
         esp_wifi_start();
-        xTaskCreate(network_wait_task, "net_wait", 4096, NULL, 3, NULL);
+        // NTP will start automatically in IP_EVENT_STA_GOT_IP handler
     }
 
     return ESP_OK;
 }
 
-// Background task: wait for WiFi, then start NTP
-static void network_wait_task(void *arg)
-{
-    // Wait for WiFi connection (or failure)
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
+// NTP and reconnect are now handled in event handlers — no background wait task needed
 
-    if (bits & WIFI_CONNECTED_BIT) {
-        ntp_start();
-        ntp_start_resync_timer();
-    } else {
-        ESP_LOGW(TAG, "WiFi failed — clock runs on RTC only");
-        oled_terminal_print("WiFi: offline");
-    }
-
-    vTaskDelete(NULL); // self-delete
-}
-
-// Manual reconnect (Button A long)
+// Manual WiFi reconnect (Button B long)
 void network_recover(void)
 {
+    if (s_state == NETWORK_CONNECTED) {
+        ESP_LOGI(TAG, "WiFi already connected");
+        oled_terminal_print("WiFi: already OK");
+        return;
+    }
+    if (s_state == NETWORK_PROVISIONING) {
+        ESP_LOGI(TAG, "Cannot reconnect during provisioning");
+        return;
+    }
     ESP_LOGI(TAG, "Manual WiFi reconnect");
     oled_terminal_print("WiFi: reconnecting...");
+    stop_reconnect_timer(); // stop periodic timer, we're trying manually
     s_retry_count = 0;
     s_state = NETWORK_CONNECTING;
     esp_wifi_connect();

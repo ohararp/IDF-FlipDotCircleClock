@@ -6,35 +6,13 @@
 #include "oled_display.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
-#include "esp_app_desc.h"
 #include "esp_system.h"
-#include "cJSON.h"
 #include <string.h>
 
 static const char *TAG = "ota";
 
 // Scratch buffer for receiving firmware chunks (4KB aligned for flash writes)
 #define OTA_BUF_SIZE 4096
-
-// ── POST /ota/check — return current firmware version ────────────────────────
-
-static esp_err_t ota_check_handler(httpd_req_t *req)
-{
-    const esp_app_desc_t *app = esp_app_get_description();
-
-    cJSON *root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "current_version", app->version);
-    // GitHub release check not yet implemented — always report up to date
-    cJSON_AddStringToObject(root, "latest_version", app->version);
-    cJSON_AddBoolToObject(root, "update_available", false);
-
-    char *json = cJSON_PrintUnformatted(root);
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, json, strlen(json));
-    free(json);
-    cJSON_Delete(root);
-    return ESP_OK;
-}
 
 // ── POST /ota/upload — receive .bin and flash to next OTA slot ───────────────
 
@@ -180,14 +158,6 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
 // Register OTA HTTP endpoints on the given server
 esp_err_t ota_register_handlers(httpd_handle_t server)
 {
-    // POST /ota/check — check current version
-    httpd_uri_t uri_check = {
-        .uri = "/ota/check",
-        .method = HTTP_POST,
-        .handler = ota_check_handler,
-    };
-    httpd_register_uri_handler(server, &uri_check);
-
     // POST /ota/upload — receive .bin and flash
     httpd_uri_t uri_upload = {
         .uri = "/ota/upload",

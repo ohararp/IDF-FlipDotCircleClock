@@ -154,16 +154,10 @@
         <h2>Firmware Update</h2>
         <div class="kv">
           <div class="k">Current Version</div><div class="v" id="otaCurrentVer">--</div>
-          <div class="k">Latest Available</div><div class="v" id="otaLatestVer">--</div>
         </div>
         <div class="actions">
-          <button id="btnOtaCheck">Check for Update</button>
-          <button id="btnOtaUpdate" class="primary" style="display:none;">Update Now</button>
-        </div>
-        <div class="actions" style="margin-top:10px;">
-          <span style="font-size:12px;opacity:0.8;">Or upload .bin:</span>
           <input type="file" id="otaFile" accept=".bin">
-          <button id="btnOtaUpload">Upload</button>
+          <button id="btnOtaUpload">Upload .bin</button>
         </div>
         <div style="margin-top:8px;font-size:12px;opacity:0.8;" id="otaStatus"></div>
       </div>
@@ -310,27 +304,7 @@
     }).catch(function(){});
   };
 
-  // OTA
-  $('btnOtaCheck').onclick=function(){
-    text('otaStatus','Checking...');
-    post('/ota/check').then(function(d){
-      text('otaLatestVer',d.latest_version||'--');
-      if(d.update_available){
-        $('btnOtaUpdate').style.display='inline-block';
-        text('otaStatus','Update available!');
-      }else{
-        $('btnOtaUpdate').style.display='none';
-        text('otaStatus','Up to date.');
-      }
-    }).catch(function(){text('otaStatus','Check failed');});
-  };
-  $('btnOtaUpdate').onclick=function(){
-    if(!confirm('Download and install firmware update? Device will reboot.'))return;
-    text('otaStatus','Downloading...');
-    post('/ota/update').then(function(d){
-      text('otaStatus',d.ok?'Update complete, rebooting...':'Update failed: '+(d.error||'unknown'));
-    }).catch(function(){text('otaStatus','Update failed');});
-  };
+  // OTA upload
   $('btnOtaUpload').onclick=function(){
     var file=$('otaFile').files[0];
     if(!file){alert('Select a .bin file first');return;}

@@ -401,16 +401,15 @@ FlipDotCircleClock/
 ### Phase D: OTA Web Upload ✅
 - `ota_update.c/.h` — OTA firmware update via web browser upload
   - `POST /ota/upload` — receives .bin in 4KB chunks, writes to next OTA partition via `esp_ota_write()`, validates image, sets boot partition, reboots
-  - `POST /ota/check` — returns current firmware version (GitHub Releases API check planned but not yet implemented)
   - Progress feedback: OLED shows `OTA: XX%`, action log entries every 10%
   - Error handling: validates file size, partition availability, image integrity
 - `partitions.csv` — OTA layout: `ota_0` (3MB) + `ota_1` (3MB) + `otadata` (8KB), alternating slots
 - `oled_display.c` — `oled_set_status()` global status override for Line 2 (used by OTA progress)
 - OLED Line 2 shows firmware version (`vX.Y.Z`) when no status message active
-- Frontend already had OTA UI (check/upload buttons) — now wired to working backend
+- Frontend OTA card: shows current version + .bin file upload (no GitHub release check)
 - First flash must use USB (`idf.py flash`), subsequent updates via web UI upload
 
-**ESP-IDF APIs:** `esp_http_server`, `cJSON`, `esp_ota_ops`, `esp_app_desc`
+**ESP-IDF APIs:** `esp_http_server`, `esp_ota_ops`
 
 **PSRAM Configuration (resolved):**
 - FeatherS3 uses **Quad SPI PSRAM** (4 data lines via SPID/SPIQ/SPIWP/SPIHD), NOT Octal
@@ -422,4 +421,3 @@ FlipDotCircleClock/
 
 **Known issues:**
 - LittleFS persistent log disabled (component dependency issue — TODO)
-- GitHub Releases API OTA check not yet implemented (manual .bin upload only)

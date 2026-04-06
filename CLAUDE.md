@@ -98,7 +98,7 @@ FlipDotCircleClock/
 │   ├── animations.c / .h       # (Step 10) Demo, chaos, sync sequences
 │   ├── network.c / .h          # WiFi STA + BLE provisioning + NTP sync + mDNS
 │   ├── web_server.c / .h       # (Step 13) HTTP server + JSON API
-│   └── ota_update.c / .h       # (Step 13) GitHub release OTA updates
+│   └── ota_update.c / .h       # (Step 13) OTA firmware update via web upload
 ├── partitions.csv              # (Step 13) Custom partition table
 └── frontend/
     └── index.html              # (Step 13) Web UI
@@ -354,7 +354,7 @@ FlipDotCircleClock/
   - Button C (raw GPIO poll): cancel provisioning during BLE mode, resume clock
   - After provisioning: reboots to connect WiFi + sync NTP
 - NeoPixel 1Hz blink: green=WiFi+NTP, cyan=WiFi OK NTP pending, yellow=offline, purple=provisioning
-- Custom `partitions.csv`: 3MB app partition (BLE+WiFi firmware >1MB)
+- Custom `partitions.csv`: OTA layout with two 3MB app slots (BLE+WiFi firmware >1MB)
 - `sdkconfig.defaults`: BLE NimBLE enabled, Security 1 protocomm
 - Default timezone: US/Eastern (index 6)
 - I2C retry logic (3 attempts, 500ms timeout) for BLE/I2C coexistence
@@ -366,7 +366,7 @@ FlipDotCircleClock/
 
 ---
 
-## Step 13: HTTP Web Server + JSON API + Action Log ✅ (OTA pending)
+## Step 13: HTTP Web Server + JSON API + Action Log + OTA ✅
 
 **Implemented:**
 
@@ -398,12 +398,19 @@ FlipDotCircleClock/
 - `/log.json` serves RAM buffer, `/log.json?persistent=true` returns empty (LittleFS pending)
 - LittleFS persistent logging planned but disabled (component dependency issue — TODO)
 
-### Phase D: OTA Updates — NOT YET IMPLEMENTED
-- Frontend has UI (check/upload buttons) but no backend endpoints
-- TODO: `ota_update.c/.h`, GitHub Releases API, `esp_https_ota`, web upload handler
-- TODO: OTA partitions in `partitions.csv`
+### Phase D: OTA Web Upload ✅
+- `ota_update.c/.h` — OTA firmware update via web browser upload
+  - `POST /ota/upload` — receives .bin in 4KB chunks, writes to next OTA partition via `esp_ota_write()`, validates image, sets boot partition, reboots
+  - `POST /ota/check` — returns current firmware version (GitHub Releases API check planned but not yet implemented)
+  - Progress feedback: OLED shows `OTA: XX%`, action log entries every 10%
+  - Error handling: validates file size, partition availability, image integrity
+- `partitions.csv` — OTA layout: `ota_0` (3MB) + `ota_1` (3MB) + `otadata` (8KB), alternating slots
+- `oled_display.c` — `oled_set_status()` global status override for Line 2 (used by OTA progress)
+- OLED Line 2 shows firmware version (`vX.Y.Z`) when no status message active
+- Frontend already had OTA UI (check/upload buttons) — now wired to working backend
+- First flash must use USB (`idf.py flash`), subsequent updates via web UI upload
 
-**ESP-IDF APIs:** `esp_http_server`, `cJSON`
+**ESP-IDF APIs:** `esp_http_server`, `cJSON`, `esp_ota_ops`, `esp_app_desc`
 
 **PSRAM Configuration (resolved):**
 - FeatherS3 uses **Quad SPI PSRAM** (4 data lines via SPID/SPIQ/SPIWP/SPIHD), NOT Octal
@@ -415,4 +422,4 @@ FlipDotCircleClock/
 
 **Known issues:**
 - LittleFS persistent log disabled (component dependency issue — TODO)
-- OTA not implemented (frontend has UI stubs — TODO)
+- GitHub Releases API OTA check not yet implemented (manual .bin upload only)

@@ -13,6 +13,9 @@ esp_err_t oled_init(i2c_master_bus_handle_t bus_handle);
 // Pulls network state from network.h directly. status_text can be NULL for default.
 void oled_update_main(const struct tm *time, const char *status_text);
 
+// Set a global status message on OLED Line 2 (pass NULL or "" to clear)
+void oled_set_status(const char *msg);
+
 // Clear the entire OLED display
 void oled_clear(void);
 

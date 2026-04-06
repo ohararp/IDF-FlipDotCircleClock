@@ -9,6 +9,7 @@
 #include "stepper.h"
 #include "as5600.h"
 #include "nvm_storage.h"
+#include "ota_update.h"
 #include "esp_log.h"
 #include "esp_http_server.h"
 #include "esp_timer.h"
@@ -317,7 +318,7 @@ esp_err_t web_server_start(void)
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 20; // room for all endpoints
+    config.max_uri_handlers = 24; // room for all endpoints + OTA
     config.stack_size = 8192;     // larger stack for JSON building
 
     esp_err_t ret = httpd_start(&s_server, &config);
@@ -357,6 +358,9 @@ esp_err_t web_server_start(void)
     for (int i = 0; i < sizeof(post_handlers) / sizeof(post_handlers[0]); i++) {
         httpd_register_uri_handler(s_server, &post_handlers[i]);
     }
+
+    // Register OTA firmware update endpoints (/ota/check, /ota/upload)
+    ota_register_handlers(s_server);
 
     ESP_LOGI(TAG, "Web server started on port 80");
     return ESP_OK;

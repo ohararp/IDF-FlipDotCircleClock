@@ -3,6 +3,7 @@
 #include "oled_display.h"
 #include "network.h"
 #include "esp_log.h"
+#include "esp_app_desc.h"
 #include "qrcode.h"
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
@@ -16,6 +17,9 @@ static u8g2_t s_u8g2;
 
 // Track if OLED was successfully initialized (prevents crash if I2C bus fails)
 static bool s_oled_initialized = false;
+
+// Global status override — any module can set this to show a message on Line 2
+static char s_status_override[32] = {0};
 
 // I2C bus handle passed in from ds3231_init(), shared across all I2C devices
 static i2c_master_bus_handle_t s_bus_handle;
@@ -187,10 +191,19 @@ void oled_update_main(const struct tm *time, const char *status_text)
     u8g2_SetFont(&s_u8g2, u8g2_font_6x12_tr);
     draw_centered(time_str, 18);
 
-    // Line 2: Status text (6x10, centered) — y=29
+    // Line 2: Status override > status_text > firmware version (6x10, centered) — y=29
     u8g2_SetFont(&s_u8g2, u8g2_font_6x10_tr);
-    if (status_text && status_text[0] != '\0') {
+    if (s_status_override[0] != '\0') {
+        // Global status override (e.g. OTA progress)
+        draw_centered(s_status_override, 29);
+    } else if (status_text && status_text[0] != '\0') {
         draw_centered(status_text, 29);
+    } else {
+        // Show firmware version when no status message active
+        char ver_str[36];
+        const esp_app_desc_t *app = esp_app_get_description();
+        snprintf(ver_str, sizeof(ver_str), "v%s", app->version);
+        draw_centered(ver_str, 29);
     }
 
     // Line 3: Two-column network status (6x10) — y=40
@@ -207,6 +220,17 @@ void oled_update_main(const struct tm *time, const char *status_text)
 }
 
 // Clear the OLED framebuffer and push blank screen to display
+// Set a global status message on OLED Line 2 (pass NULL or "" to clear)
+void oled_set_status(const char *msg)
+{
+    if (msg) {
+        strncpy(s_status_override, msg, sizeof(s_status_override) - 1);
+        s_status_override[sizeof(s_status_override) - 1] = '\0';
+    } else {
+        s_status_override[0] = '\0';
+    }
+}
+
 void oled_clear(void)
 {
     if (!s_oled_initialized) return;

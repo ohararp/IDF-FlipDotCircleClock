@@ -41,7 +41,7 @@ idf.py -p /dev/cu.usbmodem1101 flash monitor
 - [x] **Step 10:** Animations (sync) with PID positioning (±0.09°), trapezoidal ramping
 - [x] **Step 11:** Skipped — standalone clock functional, soak testing during Step 12
 - [x] **Step 12:** WiFi + BLE provisioning + NTP sync + QR code on OLED
-- [x] **Step 13:** Web server + JSON API + action log (frontend, full API, RAM log — OTA pending)
+- [x] **Step 13:** Web server + JSON API + action log + OTA web upload (frontend, full API, RAM log, firmware update via browser)
 
 ## License
 

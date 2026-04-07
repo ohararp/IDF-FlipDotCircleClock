@@ -55,7 +55,7 @@
     select { padding:8px 10px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.25); border-radius:8px; color:#fff; font-size:12px; cursor:pointer; }
     select:focus { outline:none; box-shadow:var(--focus); }
     select option { background:#1a1f27; }
-    .log { margin-top:8px; height:200px; overflow:auto; white-space:pre-wrap; border-radius:var(--radius); border:1px solid rgba(255,255,255,0.25); background:rgba(0,0,0,0.45); padding:12px; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12px; line-height:1.4; }
+    .log { margin-top:8px; height:400px; overflow:auto; white-space:pre-wrap; border-radius:var(--radius); border:1px solid rgba(255,255,255,0.25); background:rgba(0,0,0,0.45); padding:12px; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12px; line-height:1.4; }
     .linkpill { display:inline-block; padding:6px 10px; border-radius:999px; border:1px solid rgba(255,255,255,0.30); background:rgba(255,255,255,0.06); text-decoration:none; color:#fff; font-family:monospace; font-size:11px; }
     .linkpill:hover { background:rgba(255,255,255,0.12); }
     .tag { display:inline-block; padding:4px 8px; border-radius:6px; font-size:11px; font-weight:600; }
@@ -226,13 +226,16 @@
     });
   }
 
-  // Log polling (every 5s)
+  // Log polling (every 5s) — preserves scroll position unless user is at top
   function refreshLog(){
     fetch('/log.json',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
       var el=$('log');
       if(!el||!d.entries||!d.entries.length){if(el)el.textContent='No entries.';return;}
-      el.textContent=d.entries.map(function(e){return e.ts+'  '+e.msg;}).join('\n');
-      el.scrollTop=0; // newest entries are at top
+      var text=d.entries.map(function(e){return e.ts+'  '+e.msg;}).join('\n');
+      if(el.textContent===text)return; // no change, skip DOM update
+      var wasAtTop=el.scrollTop<10; // user is near the top (newest entries)
+      el.textContent=text;
+      if(wasAtTop)el.scrollTop=0; // only auto-scroll if user was already at top
     }).catch(function(){});
   }
 
@@ -304,19 +307,24 @@
     }).catch(function(){});
   };
 
-  // OTA upload
+  // OTA upload — polls log every 2s during upload to show progress
+  var otaLogPoll=null;
   $('btnOtaUpload').onclick=function(){
     var file=$('otaFile').files[0];
     if(!file){alert('Select a .bin file first');return;}
     if(!confirm('Upload and flash '+file.name+'? Device will reboot.'))return;
     text('otaStatus','Uploading '+file.name+'...');
+    // Fast log polling during OTA so progress entries appear promptly
+    otaLogPoll=setInterval(refreshLog,2000);
     var xhr=new XMLHttpRequest();
     xhr.open('POST','/ota/upload');
     xhr.onload=function(){
       var d=JSON.parse(xhr.responseText);
       text('otaStatus',d.ok?'Upload complete, rebooting...':'Upload failed: '+(d.error||'unknown'));
+      clearInterval(otaLogPoll); otaLogPoll=null;
+      refreshLog();
     };
-    xhr.onerror=function(){text('otaStatus','Upload failed');};
+    xhr.onerror=function(){text('otaStatus','Upload failed');clearInterval(otaLogPoll);otaLogPoll=null;};
     xhr.send(file);
   };
 

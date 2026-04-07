@@ -2,8 +2,8 @@
 
 #include "esp_err.h"
 
-// Max entries in RAM ring buffer
-#define ACTION_LOG_RAM_SIZE 128
+// Max entries in RAM ring buffer (512 entries × ~100 bytes ≈ 50KB in PSRAM)
+#define ACTION_LOG_RAM_SIZE 512
 
 // Initialize action log (RAM ring buffer + LittleFS persistent log)
 esp_err_t action_log_init(void);

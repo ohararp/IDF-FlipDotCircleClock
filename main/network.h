@@ -45,5 +45,8 @@ int network_get_rssi(void);
 // Check if NTP has synced at least once since boot
 bool network_ntp_synced(void);
 
+// Request NTP re-sync (called from main loop at each hour boundary)
+void network_request_ntp_resync(void);
+
 // Check if provisioning is currently active (blocks clock startup until complete)
 bool network_is_provisioning(void);

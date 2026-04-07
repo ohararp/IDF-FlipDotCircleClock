@@ -44,8 +44,8 @@ static int s_retry_count = 0;
 // Backoff delays in ms: 2s, 4s, 8s, 16s, 30s
 static const int s_backoff_ms[] = {2000, 4000, 8000, 16000, 30000};
 
-// NTP re-sync timer handle
-static esp_timer_handle_t s_ntp_timer = NULL;
+// NTP sync counter (how many times NTP has synced since boot)
+static int s_ntp_sync_count = 0;
 
 // Periodic reconnect timer (fires every 60s after going OFFLINE)
 static esp_timer_handle_t s_reconnect_timer = NULL;
@@ -55,7 +55,6 @@ static bool s_sntp_initialized = false;
 
 // Forward declarations
 static void start_ntp(void);
-static void ntp_start_resync_timer(void);
 static void start_reconnect_timer(void);
 static void stop_reconnect_timer(void);
 
@@ -158,8 +157,9 @@ static void event_handler(void *arg, esp_event_base_t event_base,
 // NTP sync callback — called when SNTP gets a valid time
 static void ntp_sync_callback(struct timeval *tv)
 {
+    s_ntp_sync_count++;
     time_t now = tv->tv_sec;
-    ESP_LOGI(TAG, "NTP synced: UTC epoch=%ld", (long)now);
+    ESP_LOGI(TAG, "NTP synced (#%d): UTC epoch=%ld", s_ntp_sync_count, (long)now);
     oled_terminal_print("NTP synced!");
     action_log_add("NTP time synced");
 
@@ -182,29 +182,19 @@ static void start_ntp(void)
         esp_sntp_set_time_sync_notification_cb(ntp_sync_callback);
         esp_sntp_init();
         s_sntp_initialized = true;
-        ntp_start_resync_timer();
     }
 }
 
-// Timer callback: re-sync NTP hourly
-static void ntp_resync_timer_cb(void *arg)
+// Request NTP re-sync (called from main loop at each hour boundary)
+void network_request_ntp_resync(void)
 {
-    if (s_state == NETWORK_CONNECTED) {
-        ESP_LOGI(TAG, "Hourly NTP re-sync");
+    if (s_state == NETWORK_CONNECTED && s_sntp_initialized) {
+        ESP_LOGI(TAG, "Hourly NTP re-sync (top of hour)");
+        action_log_add("NTP re-sync (hourly)");
         esp_sntp_restart();
+    } else {
+        ESP_LOGW(TAG, "NTP re-sync skipped (state=%d, sntp_init=%d)", s_state, s_sntp_initialized);
     }
-}
-
-// Start hourly NTP re-sync timer
-static void ntp_start_resync_timer(void)
-{
-    esp_timer_create_args_t timer_args = {
-        .callback = ntp_resync_timer_cb,
-        .name = "ntp_resync",
-    };
-    esp_timer_create(&timer_args, &s_ntp_timer);
-    esp_timer_start_periodic(s_ntp_timer, 3600ULL * 1000000ULL); // 1 hour in µs
-    ESP_LOGI(TAG, "NTP re-sync timer: every 1 hour");
 }
 
 // ── Periodic reconnect (after going OFFLINE) ─────────────────────────────────

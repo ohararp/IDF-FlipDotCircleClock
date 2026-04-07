@@ -35,7 +35,7 @@ The CircuitPython version worked, but it had limits. The ESP-IDF port is a diffe
 ### Connectivity
 - **WiFi:** Background STA connection with exponential backoff and automatic reconnect
 - **BLE Provisioning:** Set up WiFi from your phone using the ESP BLE Prov app — scan a QR code on the OLED, done
-- **NTP:** Automatic time sync on WiFi connect, hourly re-sync, 18 timezone definitions with DST rules (US/EU/AU/NZ)
+- **NTP:** Automatic time sync on WiFi connect, hourly re-sync at the top of each hour, 18 timezone definitions with DST rules (US/EU/AU/NZ)
 - **mDNS:** Access the clock at `http://flipclock.local`
 
 ### Web Dashboard
@@ -47,7 +47,7 @@ A dark-themed, responsive single-page web app served directly from the ESP32:
 - **AS5600 calibration:** Start/Save/Cancel with live angle feedback
 - **Timezone selector:** 18 timezones grouped by region, auto-applied on change
 - **OTA firmware update:** Upload a .bin file from any browser — no USB cable needed
-- **Action log:** Scrollable event log with timestamps, auto-refreshing every 5 seconds
+- **Action log:** 512-entry scrollable event log with timestamps — preserves scroll position while browsing, faster polling during OTA updates
 - **Responsive layout:** Two-column on desktop, single-column on mobile
 
 ### Precision Motor Control
@@ -113,7 +113,7 @@ No more plugging in USB cables to update firmware:
 
 1. Build your new firmware: `idf.py build`
 2. Open `http://flipclock.local` in any browser
-3. Scroll to **Firmware Update**, select `build/FlipDotCircleClock.bin`
+3. Scroll to **Firmware Update**, select `build/FlipDotCircleClock_v{VERSION}.bin`
 4. Click **Upload** — the OLED shows progress (`OTA: 10%`... `OTA: 90%`... `OTA: rebooting...`)
 5. Clock reboots on the new firmware in seconds
 

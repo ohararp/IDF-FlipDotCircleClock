@@ -342,7 +342,9 @@ FlipDotCircleClock/
   - `network_get_ip_str()`, `network_get_rssi()`, `network_ntp_synced()`
   - `network_reset_provisioning()` — sets NVS prov request flag, reboots
   - `network_stop_provisioning()` — cleanly stop BLE and free resources
-  - NTP via `esp_sntp`: sync on WiFi connect, hourly re-sync timer, writes UTC to RTC
+  - `network_request_ntp_resync()` — public function called from main loop at each hour boundary (top of hour)
+  - NTP via `esp_sntp`: sync on WiFi connect, hourly re-sync at top of each hour (driven by clock_task hour-change detection, not standalone timer), writes UTC to RTC
+  - NTP sync counter (`s_ntp_sync_count`) tracks total syncs since boot for diagnostics
   - mDNS: `flipclock.local` registered after WiFi connects
 - `oled_display.c` — `oled_show_qr()`: QR code rendered on left 64px with label text on right (POP, cancel instructions)
 - `timekeeping.c` — dual-mode RTC:
@@ -378,8 +380,9 @@ FlipDotCircleClock/
   - Motor: position, AS5600 angle, speed dropdown (auto-applies on change, 100-1000µs)
   - Calibration: Start/Save/Cancel with live AS5600 angle display
   - OTA card: check for update, upload .bin (endpoints stubbed, Phase D pending)
-  - Action log: scrollable monospace log, newest first, auto-refresh every 5s
-  - Polling: status every 1s, log every 5s
+  - Action log: scrollable monospace log (400px height), newest first, auto-refresh every 5s, preserves scroll position while browsing
+  - OTA upload: fast log polling (2s) during upload so progress entries appear in real-time
+  - Polling: status every 1s, log every 5s (2s during OTA)
   - Responsive: two-column desktop, single-column mobile
 
 ### Phase B: Web Server + JSON API ✅
@@ -392,7 +395,7 @@ FlipDotCircleClock/
 - All OLED functions guard against uninitialized U8G2 (prevents crash if I2C bus fails)
 
 ### Phase C: Action Log (RAM-only) ✅
-- `action_log.c/.h` — 128-entry RAM ring buffer with mutex protection
+- `action_log.c/.h` — 512-entry RAM ring buffer with mutex protection (~50KB in PSRAM)
 - Timestamped entries (HH:MM:SS), newest first in JSON output
 - Wired into all key events: button presses, web commands, motor homing, PID convergence/failure, WiFi connect/disconnect/offline, NTP sync, BLE provisioning, flipdot updates, minute/hour changes, calibration, animations
 - `/log.json` serves RAM buffer, `/log.json?persistent=true` returns empty (LittleFS pending)

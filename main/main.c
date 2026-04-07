@@ -309,6 +309,8 @@ void app_main(void)
                     min_old = local.tm_min; // prevent double minute update
                     xSemaphoreGive(s_hw_mutex);
                 }
+                // NTP re-sync at top of each hour (outside mutex — network, not hardware)
+                network_request_ntp_resync();
             }
         }
 

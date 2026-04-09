@@ -29,11 +29,11 @@ The CircuitPython version worked, but it had limits. The ESP-IDF port is a diffe
 - **Hour display:** 3-column x 4-row flip-dot matrix (12 dots, 24V relay-switched, bit-banged SPI)
 - **Positioning:** AS5600 magnetic encoder with PID closed-loop control — ±0.09° accuracy (±1 encoder unit)
 - **Timekeeping:** DS3231 RTC with battery backup, automatic NTP sync when WiFi is available
-- **Display:** SH1107 128x64 OLED showing time, date, network status, firmware version
+- **Display:** SH1107 128x64 OLED showing time, date, network status, firmware version, with burn-in mitigation (pixel shift, periodic blank, hourly inverse refresh)
 - **Status LED:** NeoPixel with 1Hz blink — green (online), cyan (WiFi OK, NTP pending), yellow (offline), purple (provisioning)
 
 ### Connectivity
-- **WiFi:** Background STA connection with exponential backoff and automatic reconnect
+- **WiFi:** Background STA connection with reason-aware exponential backoff, indefinite auto-reconnect, link-health watchdog, and DHCP-lease-loss recovery
 - **BLE Provisioning:** Set up WiFi from your phone using the ESP BLE Prov app — scan a QR code on the OLED, done
 - **NTP:** Automatic time sync on WiFi connect, hourly re-sync at the top of each hour, 18 timezone definitions with DST rules (US/EU/AU/NZ)
 - **mDNS:** Access the clock at `http://flipclock.local`

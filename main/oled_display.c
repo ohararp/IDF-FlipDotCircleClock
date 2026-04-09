@@ -8,6 +8,7 @@
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "u8g2.h"
 
 static const char *TAG = "oled";
@@ -17,6 +18,15 @@ static u8g2_t s_u8g2;
 
 // Track if OLED was successfully initialized (prevents crash if I2C bus fails)
 static bool s_oled_initialized = false;
+
+// Mutex serializing all u8g2 framebuffer access — display task (Core 1),
+// network event handler (Core 0), and SNTP callback (LWIP task) all touch
+// the shared u8g2 context. Without this, interleaved u8g2 calls corrupt
+// internal state and the screen freezes on the last drawn frame.
+static SemaphoreHandle_t s_oled_mutex = NULL;
+// Wait up to 100 ms for the mutex — long enough to ride out a ~50 ms I2C
+// transmit on the other task, short enough to never block clock_task.
+#define OLED_MUTEX_WAIT_MS 100
 
 // Global status override — any module can set this to show a message on Line 2
 static char s_status_override[32] = {0};
@@ -110,6 +120,11 @@ esp_err_t oled_init(i2c_master_bus_handle_t bus_handle)
 {
     s_bus_handle = bus_handle;
 
+    // Create the U8G2 access mutex before any drawing happens
+    if (s_oled_mutex == NULL) {
+        s_oled_mutex = xSemaphoreCreateMutex();
+    }
+
     // SH1107 native resolution is 64x128; U8G2_R1 rotates to 128x64 landscape
     u8g2_Setup_sh1107_i2c_64x128_f(
         &s_u8g2, U8G2_R1,           // full framebuffer mode, 90° rotation
@@ -132,17 +147,54 @@ esp_err_t oled_init(i2c_master_bus_handle_t bus_handle)
     return ESP_OK;
 }
 
-// Helper: draw string centered horizontally at given y position
+// Burn-in mitigation: per-frame pixel-shift offsets applied by all draw helpers.
+// Set fresh by oled_update_main() based on the current minute, then read here.
+static int s_shift_x = 0;
+static int s_shift_y = 0;
+
+// Helper: draw string centered horizontally at given y position (with burn-in shift applied)
 static void draw_centered(const char *str, int y)
 {
     int w = u8g2_GetStrWidth(&s_u8g2, str);
-    u8g2_DrawStr(&s_u8g2, (128 - w) / 2, y, str);
+    u8g2_DrawStr(&s_u8g2, (128 - w) / 2 + s_shift_x, y + s_shift_y, str);
 }
 
 // Main display: time, status, network info, IP, date — matches CircuitPython layout
 void oled_update_main(const struct tm *time, const char *status_text)
 {
     if (!s_oled_initialized) return;
+    // Serialize u8g2 access — display task vs network/SNTP terminal_print
+    if (s_oled_mutex && xSemaphoreTake(s_oled_mutex, pdMS_TO_TICKS(OLED_MUTEX_WAIT_MS)) != pdTRUE) {
+        return; // bus busy with another writer; try again next 1s tick
+    }
+
+    // ── Burn-in mitigation #3: hardware invert for 2s at the top of every hour ──
+    // SH1107 cmd 0xA6 = normal, 0xA7 = inverse. Toggle the chip directly so we
+    // don't have to redraw the framebuffer; tracked with a static edge detector.
+    static bool s_inverted = false;
+    bool want_inverted = (time->tm_min == 0 && time->tm_sec < 2);
+    if (want_inverted != s_inverted) {
+        u8x8_cad_StartTransfer(&s_u8g2.u8x8);
+        u8x8_cad_SendCmd(&s_u8g2.u8x8, want_inverted ? 0xA7 : 0xA6);
+        u8x8_cad_EndTransfer(&s_u8g2.u8x8);
+        s_inverted = want_inverted;
+    }
+
+    // ── Burn-in mitigation #1: blank for 1s every 10 min (xx:00:30, xx:10:30, …) ──
+    // Picked the :30 second so it doesn't collide with hourly NTP re-sync at :00.
+    if (time->tm_min % 10 == 0 && time->tm_sec == 30) {
+        u8g2_ClearBuffer(&s_u8g2);
+        u8g2_SendBuffer(&s_u8g2);
+        if (s_oled_mutex) xSemaphoreGive(s_oled_mutex);
+        return;
+    }
+
+    // ── Burn-in mitigation #2: pixel shift — drift entire layout 0..2 px in x and y ──
+    // 9-position cycle (3x3), advances every 5 minutes → full cycle every 45 minutes.
+    int phase = (time->tm_hour * 60 + time->tm_min) / 5;
+    s_shift_x = phase % 3;            // 0..2
+    s_shift_y = (phase / 3) % 3;      // 0..2
+
     char time_str[9];   // "HH:MM:SS\0"
     char date_str[36];  // "YYYY-MM-DD\0"
     char wifi_col[12];  // "WiFi:OK" etc
@@ -177,14 +229,14 @@ void oled_update_main(const struct tm *time, const char *status_text)
 
     u8g2_ClearBuffer(&s_u8g2);
 
-    // Rounded border (2px, 5px corner radius)
-    u8g2_DrawRFrame(&s_u8g2, 0, 0, 128, 64, 5);
+    // Rounded border — shrunk to 126x62 so 0-2px shift never clips off-screen
+    u8g2_DrawRFrame(&s_u8g2, s_shift_x, s_shift_y, 126, 62, 5);
 
     // WiFi dot — top right corner (filled=connected, hollow=offline)
     if (net == NETWORK_CONNECTED) {
-        u8g2_DrawDisc(&s_u8g2, 120, 8, 4, U8G2_DRAW_ALL); // filled circle
+        u8g2_DrawDisc(&s_u8g2, 118 + s_shift_x, 8 + s_shift_y, 4, U8G2_DRAW_ALL); // filled
     } else {
-        u8g2_DrawCircle(&s_u8g2, 120, 8, 4, U8G2_DRAW_ALL); // hollow circle
+        u8g2_DrawCircle(&s_u8g2, 118 + s_shift_x, 8 + s_shift_y, 4, U8G2_DRAW_ALL); // hollow
     }
 
     // Line 1: Time (6x12 monospace, centered) — y=18 (baseline)
@@ -206,9 +258,9 @@ void oled_update_main(const struct tm *time, const char *status_text)
         draw_centered(ver_str, 29);
     }
 
-    // Line 3: Two-column network status (6x10) — y=40
-    u8g2_DrawStr(&s_u8g2, 6, 40, wifi_col);           // left column
-    u8g2_DrawStr(&s_u8g2, 72, 40, ntp_col);            // right column
+    // Line 3: Two-column network status (6x10) — y=40, with burn-in shift applied
+    u8g2_DrawStr(&s_u8g2, 6 + s_shift_x, 40 + s_shift_y, wifi_col);   // left column
+    u8g2_DrawStr(&s_u8g2, 72 + s_shift_x, 40 + s_shift_y, ntp_col);   // right column
 
     // Line 4: IP address (6x10, centered) — y=51
     draw_centered(ip, 51);
@@ -217,6 +269,7 @@ void oled_update_main(const struct tm *time, const char *status_text)
     draw_centered(date_str, 61);
 
     u8g2_SendBuffer(&s_u8g2);
+    if (s_oled_mutex) xSemaphoreGive(s_oled_mutex);
 }
 
 // Clear the OLED framebuffer and push blank screen to display
@@ -234,8 +287,10 @@ void oled_set_status(const char *msg)
 void oled_clear(void)
 {
     if (!s_oled_initialized) return;
+    if (s_oled_mutex && xSemaphoreTake(s_oled_mutex, pdMS_TO_TICKS(OLED_MUTEX_WAIT_MS)) != pdTRUE) return;
     u8g2_ClearBuffer(&s_u8g2);
     u8g2_SendBuffer(&s_u8g2);
+    if (s_oled_mutex) xSemaphoreGive(s_oled_mutex);
 }
 
 // ── Scrolling terminal mode ──────────────────────────────────────────────────
@@ -251,6 +306,9 @@ static int s_term_count = 0; // total lines added (for indexing into ring buffer
 void oled_terminal_print(const char *line)
 {
     if (!s_oled_initialized) return; // skip if OLED not available
+    if (s_oled_mutex && xSemaphoreTake(s_oled_mutex, pdMS_TO_TICKS(OLED_MUTEX_WAIT_MS)) != pdTRUE) {
+        return; // bus busy — drop this terminal line rather than corrupt u8g2 state
+    }
     // Write into ring buffer at next slot
     int idx = s_term_count % TERM_MAX_LINES;
     strncpy(s_term_lines[idx], line, TERM_LINE_LEN - 1);
@@ -269,6 +327,7 @@ void oled_terminal_print(const char *line)
         u8g2_DrawStr(&s_u8g2, 0, 7 + (i * 8), s_term_lines[buf_idx]); // 8px line height
     }
     u8g2_SendBuffer(&s_u8g2); // push to display
+    if (s_oled_mutex) xSemaphoreGive(s_oled_mutex);
 }
 
 // ── QR Code display ──────────────────────────────────────────────────────────
@@ -317,6 +376,7 @@ static void qr_display_callback(esp_qrcode_handle_t qrcode)
 void oled_show_qr(const char *text)
 {
     if (!s_oled_initialized) return;
+    if (s_oled_mutex && xSemaphoreTake(s_oled_mutex, pdMS_TO_TICKS(OLED_MUTEX_WAIT_MS)) != pdTRUE) return;
     s_qr_u8g2_ptr = &s_u8g2; // pass U8G2 context to callback
 
     esp_qrcode_config_t cfg = {
@@ -326,8 +386,9 @@ void oled_show_qr(const char *text)
     };
 
     esp_err_t ret = esp_qrcode_generate(&cfg, text);
+    if (s_oled_mutex) xSemaphoreGive(s_oled_mutex);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "QR generation failed: %s", esp_err_to_name(ret));
-        oled_terminal_print("QR: gen failed");
+        oled_terminal_print("QR: gen failed"); // re-acquires the mutex internally
     }
 }

@@ -38,25 +38,34 @@ static bool s_ntp_synced = false;
 #define WIFI_FAIL_BIT       BIT1
 static EventGroupHandle_t s_wifi_event_group;
 
-// Retry counter and exponential backoff for WiFi reconnection
+// Retry counter for WiFi reconnection — never gives up, just caps the backoff
 static int s_retry_count = 0;
-#define MAX_RETRIES 5
-// Backoff delays in ms: 2s, 4s, 8s, 16s, 30s
-static const int s_backoff_ms[] = {2000, 4000, 8000, 16000, 30000};
+// Backoff delays in ms: 2s, 4s, 8s, 15s, 30s, then 60s forever
+static const int s_backoff_ms[] = {2000, 4000, 8000, 15000, 30000, 60000};
+#define BACKOFF_LEVELS (sizeof(s_backoff_ms) / sizeof(s_backoff_ms[0]))
 
 // NTP sync counter (how many times NTP has synced since boot)
 static int s_ntp_sync_count = 0;
 
-// Periodic reconnect timer (fires every 60s after going OFFLINE)
+// One-shot retry timer — schedules esp_wifi_connect() out of the event loop task
+static esp_timer_handle_t s_retry_timer = NULL;
+// Long-period safety net timer (fires every 5 min while not connected)
 static esp_timer_handle_t s_reconnect_timer = NULL;
+// Periodic link-health watchdog (catches "ghost connected" state with no events)
+static esp_timer_handle_t s_health_timer = NULL;
 
 // Track if NTP/SNTP has been initialized (so we restart instead of re-init)
 static bool s_sntp_initialized = false;
+// Track if mDNS has been started (only init once across reconnects)
+static bool s_mdns_started = false;
 
 // Forward declarations
 static void start_ntp(void);
 static void start_reconnect_timer(void);
 static void stop_reconnect_timer(void);
+static void schedule_retry(int delay_ms);
+static void stop_retry_timer(void);
+static void start_health_timer(void);
 
 // ── Event handlers ───────────────────────────────────────────────────────────
 
@@ -69,25 +78,59 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         if (event_id == WIFI_EVENT_STA_START) {
             esp_wifi_connect();
         } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+            // Pull reason code so we can log + branch on the cause of the drop
+            wifi_event_sta_disconnected_t *d = (wifi_event_sta_disconnected_t *)event_data;
+            uint8_t reason = d ? d->reason : 0;
             s_state = NETWORK_DISCONNECTED;
-            ESP_LOGW(TAG, "WiFi disconnected");
-            action_log_add("WiFi disconnected");
-            if (s_retry_count < MAX_RETRIES) {
-                // Exponential backoff: wait before retrying
-                int delay = s_backoff_ms[s_retry_count < 5 ? s_retry_count : 4];
-                s_retry_count++;
-                ESP_LOGI(TAG, "Retrying WiFi in %dms (%d/%d)...", delay, s_retry_count, MAX_RETRIES);
-                vTaskDelay(pdMS_TO_TICKS(delay));
-                esp_wifi_connect();
-            } else {
-                s_state = NETWORK_OFFLINE;
-                ESP_LOGW(TAG, "WiFi offline after %d retries — periodic reconnect every 5 min", MAX_RETRIES);
-                action_log_add("WiFi offline (retries exhausted)");
-                xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
-                // Start periodic reconnect timer (every 60s)
-                start_reconnect_timer();
+            ESP_LOGW(TAG, "WiFi disconnected (reason=%u)", reason);
+            char msg[48];
+            snprintf(msg, sizeof(msg), "WiFi disconnected (r=%u)", reason);
+            action_log_add(msg);
+
+            // Decide retry delay based on disconnect reason
+            int delay;
+            switch (reason) {
+                // Transient hiccups — try to reconnect immediately on first occurrence
+                case WIFI_REASON_BEACON_TIMEOUT:
+                case WIFI_REASON_ASSOC_LEAVE:
+                case WIFI_REASON_AUTH_EXPIRE:
+                    if (s_retry_count == 0) {
+                        delay = 500; // half-second snap reconnect
+                    } else {
+                        delay = s_backoff_ms[s_retry_count < BACKOFF_LEVELS ? s_retry_count : BACKOFF_LEVELS - 1];
+                    }
+                    break;
+                // Auth-class failures — don't hammer the AP, use long floor
+                case WIFI_REASON_AUTH_FAIL:
+                case WIFI_REASON_ASSOC_NOT_AUTHED:
+                case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+                case WIFI_REASON_HANDSHAKE_TIMEOUT:
+                    delay = 30000; // 30s floor
+                    ESP_LOGW(TAG, "WiFi auth failure — credentials may be wrong");
+                    break;
+                // Default (incl. NO_AP_FOUND while router is rebooting): standard backoff
+                default:
+                    delay = s_backoff_ms[s_retry_count < BACKOFF_LEVELS ? s_retry_count : BACKOFF_LEVELS - 1];
+                    break;
             }
+            s_retry_count++;
+            ESP_LOGI(TAG, "Scheduling WiFi reconnect in %dms (attempt #%d)", delay, s_retry_count);
+            // Schedule the retry on a timer — must NOT block the event loop task
+            schedule_retry(delay);
+            // Long-period safety net in case the retry timer ever stalls
+            start_reconnect_timer();
+            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
         }
+    }
+
+    // IP events — STA_LOST_IP fires when DHCP lease drops without disconnect
+    if (event_base == IP_EVENT && event_id == IP_EVENT_STA_LOST_IP) {
+        ESP_LOGW(TAG, "DHCP lease lost — forcing reconnect");
+        action_log_add("DHCP lease lost");
+        s_state = NETWORK_DISCONNECTED;
+        snprintf(s_ip_str, sizeof(s_ip_str), "N/A");
+        // Force a clean disconnect; STA_DISCONNECTED handler above will reschedule retry
+        esp_wifi_disconnect();
     }
 
     // IP events — fires on every WiFi connect (including reconnects)
@@ -100,16 +143,23 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         s_retry_count = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
 
-        // Stop periodic reconnect timer if running
+        // Stop both retry and safety-net timers — we're back online
+        stop_retry_timer();
         stop_reconnect_timer();
+        // Kick off the link-health watchdog (idempotent)
+        start_health_timer();
 
         // Start or restart NTP on every connect/reconnect
         start_ntp();
 
-        // Start mDNS so clock is discoverable as flipclock.local
-        mdns_init();
-        mdns_hostname_set("flipclock");
-        ESP_LOGI(TAG, "mDNS: flipclock.local");
+        // Start mDNS once — re-init on reconnects is wasteful and can fail
+        if (!s_mdns_started) {
+            if (mdns_init() == ESP_OK) {
+                mdns_hostname_set("flipclock");
+                s_mdns_started = true;
+                ESP_LOGI(TAG, "mDNS: flipclock.local");
+            }
+        }
     }
 
     // Provisioning events
@@ -197,40 +247,96 @@ void network_request_ntp_resync(void)
     }
 }
 
-// ── Periodic reconnect (after going OFFLINE) ─────────────────────────────────
+// ── Reconnect timers ─────────────────────────────────────────────────────────
 
-// Timer callback: attempt WiFi reconnect every 60s while OFFLINE
-static void reconnect_timer_cb(void *arg)
+// One-shot retry callback — runs in esp_timer task, NOT the WiFi event loop
+static void retry_timer_cb(void *arg)
 {
-    if (s_state == NETWORK_OFFLINE) {
-        ESP_LOGI(TAG, "Periodic reconnect attempt...");
-        action_log_add("WiFi auto-reconnect attempt");
-        s_retry_count = 0; // reset retry counter for fresh attempt
-        s_state = NETWORK_CONNECTING;
-        esp_wifi_connect();
+    if (s_state == NETWORK_CONNECTED) return; // already back, nothing to do
+    ESP_LOGI(TAG, "Retry timer fired — calling esp_wifi_connect()");
+    s_state = NETWORK_CONNECTING;
+    esp_wifi_connect();
+}
+
+// Schedule a one-shot reconnect attempt after `delay_ms` (creates the timer lazily)
+static void schedule_retry(int delay_ms)
+{
+    if (s_retry_timer == NULL) {
+        esp_timer_create_args_t args = {
+            .callback = retry_timer_cb,
+            .name = "wifi_retry",
+        };
+        esp_timer_create(&args, &s_retry_timer);
+    }
+    esp_timer_stop(s_retry_timer); // ignore error if not running
+    esp_timer_start_once(s_retry_timer, (uint64_t)delay_ms * 1000ULL);
+}
+
+// Cancel any pending one-shot retry
+static void stop_retry_timer(void)
+{
+    if (s_retry_timer != NULL) {
+        esp_timer_stop(s_retry_timer);
     }
 }
 
-// Start the 5-minute periodic reconnect timer
+// Safety-net periodic timer — fires every 5 min in case the retry chain ever stalls
+static void reconnect_timer_cb(void *arg)
+{
+    if (s_state == NETWORK_CONNECTED) return;
+    ESP_LOGW(TAG, "Safety-net reconnect: forcing fresh attempt");
+    action_log_add("WiFi safety-net reconnect");
+    s_retry_count = 0; // reset backoff so we try fast again
+    schedule_retry(100);
+}
+
+// Start the 5-minute safety-net timer (idempotent)
 static void start_reconnect_timer(void)
 {
     if (s_reconnect_timer == NULL) {
         esp_timer_create_args_t args = {
             .callback = reconnect_timer_cb,
-            .name = "wifi_reconnect",
+            .name = "wifi_safety_net",
         };
         esp_timer_create(&args, &s_reconnect_timer);
     }
-    esp_timer_start_periodic(s_reconnect_timer, 300ULL * 1000000ULL); // 5 minutes
-    ESP_LOGI(TAG, "Periodic reconnect timer started (5 min)");
+    esp_timer_stop(s_reconnect_timer);
+    esp_timer_start_periodic(s_reconnect_timer, 300ULL * 1000000ULL); // 5 min
 }
 
-// Stop the periodic reconnect timer (called when WiFi connects)
+// Stop the safety-net timer (called when WiFi connects)
 static void stop_reconnect_timer(void)
 {
     if (s_reconnect_timer != NULL) {
         esp_timer_stop(s_reconnect_timer);
-        ESP_LOGI(TAG, "Periodic reconnect timer stopped");
+    }
+}
+
+// ── Link-health watchdog ─────────────────────────────────────────────────────
+
+// Periodic watchdog — catches "ghost connected" state where no event ever fires
+static void health_timer_cb(void *arg)
+{
+    if (s_state != NETWORK_CONNECTED) return;
+    wifi_ap_record_t ap;
+    esp_err_t err = esp_wifi_sta_get_ap_info(&ap);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Health check: get_ap_info=%s — forcing reconnect", esp_err_to_name(err));
+        action_log_add("WiFi ghost-connect detected");
+        esp_wifi_disconnect(); // STA_DISCONNECTED handler will reschedule
+    }
+}
+
+// Start the 2-minute link-health watchdog (idempotent — only creates once)
+static void start_health_timer(void)
+{
+    if (s_health_timer == NULL) {
+        esp_timer_create_args_t args = {
+            .callback = health_timer_cb,
+            .name = "wifi_health",
+        };
+        esp_timer_create(&args, &s_health_timer);
+        esp_timer_start_periodic(s_health_timer, 120ULL * 1000000ULL); // 2 min
     }
 }
 
@@ -322,15 +428,18 @@ esp_err_t network_init(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_create_default_wifi_sta();
 
-    // Register event handlers
+    // Register event handlers — STA_LOST_IP catches DHCP lease drops with no disconnect
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_LOST_IP, &event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL));
 
     // Initialize WiFi driver
     wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    // Disable WiFi power save — clock is mains powered; PS can cause spurious BEACON_TIMEOUT
+    esp_wifi_set_ps(WIFI_PS_NONE);
 
     // Init prov manager to check credential state (kept alive — not deinit'd)
     network_prov_mgr_config_t prov_config = {
@@ -387,6 +496,16 @@ esp_err_t network_init(void)
         oled_terminal_print("WiFi: connecting...");
         s_state = NETWORK_CONNECTING;
         network_prov_mgr_deinit(); // don't need prov manager for direct connect
+
+        // Tune the stored STA config: full-channel scan, sort by signal, driver-level retry
+        wifi_config_t cfg;
+        if (esp_wifi_get_config(WIFI_IF_STA, &cfg) == ESP_OK) {
+            cfg.sta.scan_method       = WIFI_ALL_CHANNEL_SCAN;       // scan every channel — survives AP/channel changes
+            cfg.sta.sort_method       = WIFI_CONNECT_AP_BY_SIGNAL;   // pick strongest BSSID for SSID
+            cfg.sta.threshold.rssi    = -127;                        // accept any signal
+            cfg.sta.failure_retry_cnt = 3;                           // driver-level retries before bubbling STA_DISCONNECTED
+            esp_wifi_set_config(WIFI_IF_STA, &cfg);
+        }
         esp_wifi_start();
         // NTP will start automatically in IP_EVENT_STA_GOT_IP handler
     }
@@ -411,9 +530,11 @@ void network_recover(void)
     ESP_LOGI(TAG, "Manual WiFi reconnect");
     action_log_add("WiFi manual reconnect");
     oled_terminal_print("WiFi: reconnecting...");
-    stop_reconnect_timer(); // stop periodic timer, we're trying manually
-    s_retry_count = 0;
+    stop_retry_timer();      // cancel any pending one-shot retry
+    stop_reconnect_timer();  // cancel safety-net periodic timer
+    s_retry_count = 0;       // reset backoff
     s_state = NETWORK_CONNECTING;
+    esp_wifi_disconnect();   // clear any stale driver state — error ignored
     esp_wifi_connect();
 }
 
